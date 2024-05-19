@@ -81,8 +81,17 @@ class TranscriptionThread(QThread):
     def run(self):
         if self.file_path:
             transcription_result = self.transcribe_audio(self.file_path)
-            refined_text = self.refine_text(transcription_result)
-            self.finished.emit(transcription_result, refined_text)
+            if "Failed to transcribe" not in transcription_result:
+                # Delete the MP3 file after successful transcription
+                try:
+                    os.remove(self.file_path)
+                except OSError as e:
+                    print(f"Error deleting file: {e}")
+                # Proceed to refine the text
+                refined_text = self.refine_text(transcription_result)
+                self.finished.emit(transcription_result, refined_text)
+            else:
+                self.finished.emit(transcription_result, "")
         else:
             self.finished.emit("No file to transcribe.", "")
 
@@ -97,7 +106,7 @@ class TranscriptionThread(QThread):
             return error_message
 
     def refine_text(self, text):
-        response = ollama.chat(model='llama3:8b-instruct-fp16', messages=[
+        response = ollama.chat(model='llama3', messages=[
             {
                 'role': 'system',
                 # 'content': 'You are my English corrector. Your task is to only correct any spelling discrepancies in the transcribed text, improve my English vocabulary when necessary, using a C1 level of English. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, nothing else but the corrected text.',
@@ -108,7 +117,13 @@ class TranscriptionThread(QThread):
                 # 'content': text,
                 'content': 'Here is the text to be corrected: "' + text + '"',
             },
-        ])
+
+        ],
+                               options={
+                                   'ctx_num': 8000,
+                                   'temperature': 0.35
+                               }
+                               )
         return response['message']['content']
 
 
@@ -173,8 +188,11 @@ class AudioTranscriberApp(QWidget):
             self.worker.start()
 
     def display_transcription(self, original_text, refined_text):
-        self.transcription_box.setText(original_text)
-        self.text_refined_box.setText(refined_text)
+        if "Failed to transcribe" not in original_text:
+            self.transcription_box.setText(original_text)
+            self.text_refined_box.setText(refined_text)
+        else:
+            self.transcription_box.setText(original_text)
 
     def copy_text(self, text_edit):
         clipboard = QApplication.clipboard()
