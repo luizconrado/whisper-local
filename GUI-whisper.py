@@ -9,6 +9,10 @@ from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPu
 from PyQt5.QtCore import pyqtSignal, QThread, Qt
 import mlx_whisper  # Ensure mlx_whisper is properly imported
 import ollama
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Audio configuration
 sample_rate = 44100
@@ -25,41 +29,49 @@ recording_finished = threading.Event()  # Threading event to indicate recording 
 
 
 def record_audio():
+    """
+    Record audio and save it as a temporary WAV file and a final MP3 file.
+    """
     global audio, stream, is_recording, recording_file_name, recording_finished
 
     audio = pyaudio.PyAudio()
-    stream = audio.open(format=format,
-                        channels=channels,
-                        rate=sample_rate,
-                        input=True,
-                        frames_per_buffer=1024)
+    try:
+        stream = audio.open(format=format,
+                            channels=channels,
+                            rate=sample_rate,
+                            input=True,
+                            frames_per_buffer=1024)
 
-    recorded_data = []
-    while is_recording:
-        data = stream.read(1024, exception_on_overflow=False)
-        recorded_data.append(data)
+        recorded_data = []
+        while is_recording:
+            data = stream.read(1024, exception_on_overflow=False)
+            recorded_data.append(data)
 
-    temp_wav_file = f"temp_{datetime.datetime.now().strftime(timestamp_format)}.wav"
-    with wave.open(temp_wav_file, 'wb') as output_file:
-        output_file.setnchannels(channels)
-        output_file.setsampwidth(audio.get_sample_size(format))
-        output_file.setframerate(sample_rate)
-        output_file.writeframes(b''.join(recorded_data))
+        temp_wav_file = f"temp_{datetime.datetime.now().strftime(timestamp_format)}.wav"
+        with wave.open(temp_wav_file, 'wb') as output_file:
+            output_file.setnchannels(channels)
+            output_file.setsampwidth(audio.get_sample_size(format))
+            output_file.setframerate(sample_rate)
+            output_file.writeframes(b''.join(recorded_data))
 
-    recording_file_name = f"recorded_audio_{datetime.datetime.now().strftime(timestamp_format)}.mp3"
-    sound = AudioSegment.from_wav(temp_wav_file)
-    sound.export(recording_file_name, format="mp3")
+        recording_file_name = f"recorded_audio_{datetime.datetime.now().strftime(timestamp_format)}.mp3"
+        sound = AudioSegment.from_wav(temp_wav_file)
+        sound.export(recording_file_name, format="mp3")
 
-    os.remove(temp_wav_file)
-
-    stream.stop_stream()
-    stream.close()
-    audio.terminate()
-
-    recording_finished.set()
+        os.remove(temp_wav_file)
+    except Exception as e:
+        logging.error(f"Error during recording: {e}")
+    finally:
+        stream.stop_stream()
+        stream.close()
+        audio.terminate()
+        recording_finished.set()
 
 
 def start_recording():
+    """
+    Start the audio recording in a separate thread.
+    """
     global is_recording
     is_recording = True
     recording_finished.clear()
@@ -67,6 +79,9 @@ def start_recording():
 
 
 def stop_recording():
+    """
+    Stop the audio recording.
+    """
     global is_recording
     is_recording = False
 
@@ -79,15 +94,16 @@ class TranscriptionThread(QThread):
         self.file_path = file_path
 
     def run(self):
+        """
+        Run the transcription and refinement process.
+        """
         if self.file_path:
             transcription_result = self.transcribe_audio(self.file_path)
             if "Failed to transcribe" not in transcription_result:
-                # Delete the MP3 file after successful transcription
                 try:
                     os.remove(self.file_path)
                 except OSError as e:
-                    print(f"Error deleting file: {e}")
-                # Proceed to refine the text
+                    logging.error(f"Error deleting file: {e}")
                 refined_text = self.refine_text(transcription_result)
                 self.finished.emit(transcription_result, refined_text)
             else:
@@ -96,16 +112,22 @@ class TranscriptionThread(QThread):
             self.finished.emit("No file to transcribe.", "")
 
     def transcribe_audio(self, file_path):
-        print(f"Transcribing the audio file {file_path}...")
+        """
+        Transcribe the audio file using mlx_whisper.
+        """
+        logging.info(f"Transcribing the audio file {file_path}...")
         try:
             result = mlx_whisper.transcribe(file_path, path_or_hf_repo="mlx-community/whisper-large-v3-mlx")
             return result['text']
         except Exception as e:
             error_message = f"Failed to transcribe: {e}"
-            print(error_message)
+            logging.error(error_message)
             return error_message
 
     def refine_text(self, text):
+        """
+        Refine the transcribed text using ollama.
+        """
         response = ollama.chat(model='llama3', messages=[
             {
                 'role': 'system',
@@ -122,8 +144,7 @@ class TranscriptionThread(QThread):
                                options={
                                    'ctx_num': 8000,
                                    'temperature': 0.35
-                               }
-                               )
+                               })
         return response['message']['content']
 
 
@@ -134,6 +155,9 @@ class AudioTranscriberApp(QWidget):
         self.initUI()
 
     def initUI(self):
+        """
+        Initialize the user interface.
+        """
         main_layout = QVBoxLayout(self)
 
         # Recording button at the top
@@ -175,6 +199,9 @@ class AudioTranscriberApp(QWidget):
         self.show()
 
     def toggle_recording(self):
+        """
+        Toggle the recording state and start/stop the recording process.
+        """
         global recording_file_name
         if not is_recording:
             self.recording_button.setText('Stop Recording')
@@ -188,6 +215,9 @@ class AudioTranscriberApp(QWidget):
             self.worker.start()
 
     def display_transcription(self, original_text, refined_text):
+        """
+        Display the transcribed and refined text in the text boxes.
+        """
         if "Failed to transcribe" not in original_text:
             self.transcription_box.setText(original_text)
             self.text_refined_box.setText(refined_text)
@@ -195,6 +225,9 @@ class AudioTranscriberApp(QWidget):
             self.transcription_box.setText(original_text)
 
     def copy_text(self, text_edit):
+        """
+        Copy text from the text edit widget to the clipboard.
+        """
         clipboard = QApplication.clipboard()
         clipboard.setText(text_edit.toPlainText())
 
