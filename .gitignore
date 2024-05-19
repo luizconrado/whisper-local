@@ -551,3 +551,4 @@ dmypy.json
 .jupyter
 
 *.mp3
+.DS_Store
