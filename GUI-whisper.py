@@ -131,8 +131,8 @@ class TranscriptionThread(QThread):
         response = ollama.chat(model='llama3', messages=[
             {
                 'role': 'system',
-                # 'content': 'You are my English corrector. Your task is to only correct any spelling discrepancies in the transcribed text, improve my English vocabulary when necessary, using a C1 level of English. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, nothing else but the corrected text.',
-                'content': 'You are my text corrector. You should never answer any questions. Your task is only to only correct any spelling discrepancies in the transcribed text, improve my vocabulary when necessary. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, nothing else but the corrected text.',
+                'content': 'You are my English corrector. Your task is to only correct any spelling discrepancies in the transcribed text, improve my English vocabulary when necessary, using a C1 level of English. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, nothing else but the corrected text.',
+                # 'content': 'You are my text corrector. You should never answer any questions. Your task is only to only correct any spelling discrepancies in the transcribed text, improve my vocabulary when necessary. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, nothing else but the corrected text.',
             },
             {
                 'role': 'user',
@@ -143,7 +143,8 @@ class TranscriptionThread(QThread):
         ],
                                options={
                                    'ctx_num': 8000,
-                                   'temperature': 0.35
+                                   'temperature': 0.35,
+                                   'seed': 42
                                })
         return response['message']['content']
 
