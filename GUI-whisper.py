@@ -5,7 +5,7 @@ import datetime
 import pyaudio
 import wave
 from pydub import AudioSegment
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QProgressBar
 from PyQt5.QtCore import pyqtSignal, QThread, Qt
 import mlx_whisper  # Ensure mlx_whisper is properly imported
 import ollama
@@ -62,9 +62,11 @@ def record_audio():
     except Exception as e:
         logging.error(f"Error during recording: {e}")
     finally:
-        stream.stop_stream()
-        stream.close()
-        audio.terminate()
+        if stream is not None:
+            stream.stop_stream()
+            stream.close()
+        if audio is not None:
+            audio.terminate()
         recording_finished.set()
 
 
@@ -87,7 +89,8 @@ def stop_recording():
 
 
 class TranscriptionThread(QThread):
-    finished = pyqtSignal(str, str)  # Emit both original and refined text
+    transcription_finished = pyqtSignal(str)  # Emit the original text
+    refinement_finished = pyqtSignal(str)  # Emit the refined text
 
     def __init__(self, file_path):
         super().__init__()
@@ -99,17 +102,19 @@ class TranscriptionThread(QThread):
         """
         if self.file_path:
             transcription_result = self.transcribe_audio(self.file_path)
+            self.transcription_finished.emit(transcription_result)
             if "Failed to transcribe" not in transcription_result:
-                try:
-                    os.remove(self.file_path)
-                except OSError as e:
-                    logging.error(f"Error deleting file: {e}")
                 refined_text = self.refine_text(transcription_result)
-                self.finished.emit(transcription_result, refined_text)
+                self.refinement_finished.emit(refined_text)
             else:
-                self.finished.emit(transcription_result, "")
+                self.refinement_finished.emit("")
+            try:
+                os.remove(self.file_path)
+            except OSError as e:
+                logging.error(f"Error deleting file: {e}")
         else:
-            self.finished.emit("No file to transcribe.", "")
+            self.transcription_finished.emit("No file to transcribe.")
+            self.refinement_finished.emit("")
 
     def transcribe_audio(self, file_path):
         """
@@ -166,6 +171,11 @@ class AudioTranscriberApp(QWidget):
         self.recording_button.clicked.connect(self.toggle_recording)
         main_layout.addWidget(self.recording_button)
 
+        # Progress bar
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setValue(0)
+        main_layout.addWidget(self.progress_bar)
+
         # Text boxes and copy buttons
         text_layout = QHBoxLayout()
 
@@ -197,6 +207,7 @@ class AudioTranscriberApp(QWidget):
 
         self.setWindowTitle('Audio Transcriber')
         self.setGeometry(300, 300, 800, 400)
+        self.setLayout(main_layout)
         self.show()
 
     def toggle_recording(self):
@@ -207,23 +218,29 @@ class AudioTranscriberApp(QWidget):
         if not is_recording:
             self.recording_button.setText('Stop Recording')
             start_recording()
+            self.progress_bar.setValue(0)
         else:
             self.recording_button.setText('Start Recording')
             stop_recording()
             recording_finished.wait()
             self.worker = TranscriptionThread(recording_file_name)
-            self.worker.finished.connect(self.display_transcription)
+            self.worker.transcription_finished.connect(self.display_transcription)
+            self.worker.refinement_finished.connect(self.display_refined_text)
             self.worker.start()
 
-    def display_transcription(self, original_text, refined_text):
+    def display_transcription(self, original_text):
         """
-        Display the transcribed and refined text in the text boxes.
+        Display the transcribed text in the transcription box.
         """
-        if "Failed to transcribe" not in original_text:
-            self.transcription_box.setText(original_text)
-            self.text_refined_box.setText(refined_text)
-        else:
-            self.transcription_box.setText(original_text)
+        self.transcription_box.setText(original_text)
+        self.progress_bar.setValue(50)
+
+    def display_refined_text(self, refined_text):
+        """
+        Display the refined text in the refined text box.
+        """
+        self.text_refined_box.setText(refined_text)
+        self.progress_bar.setValue(100)
 
     def copy_text(self, text_edit):
         """
