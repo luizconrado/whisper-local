@@ -7,7 +7,8 @@ import wave
 from pydub import AudioSegment
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QProgressBar
 from PyQt5.QtCore import pyqtSignal, QThread, Qt
-import mlx_whisper  # Ensure mlx_whisper is properly imported
+from PyQt5.QtGui import QColor
+import mlx_whisper
 import ollama
 import logging
 
@@ -133,18 +134,15 @@ class TranscriptionThread(QThread):
         """
         Refine the transcribed text using ollama.
         """
-        response = ollama.chat(model='phi3:14b', messages=[
+        response = ollama.chat(model='llama3.1:latest', messages=[
             {
                 'role': 'system',
-                # 'content': 'You are my English corrector. Your task is to only correct any spelling discrepancies in the transcribed text, improve my English vocabulary when necessary, using a C1 level of English. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, nothing else but the corrected text.',
                 'content': 'You are my text corrector. You should never answer any questions. Your task is only to only correct any spelling discrepancies in the transcribed text, improve my vocabulary when necessary, making the text clear and easy to understand. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, introduction, notes, or explanations. Only the corrected text and nothing else.',
             },
             {
                 'role': 'user',
-                # 'content': text,
                 'content': 'Here is the text to be corrected: "' + text + '"',
             },
-
         ],
                                options={
                                    'ctx_num': 8000,
@@ -154,7 +152,6 @@ class TranscriptionThread(QThread):
         return response['message']['content']
 
 
-# PyQt5 Application
 class AudioTranscriberApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -166,8 +163,9 @@ class AudioTranscriberApp(QWidget):
         """
         main_layout = QVBoxLayout(self)
 
-        # Recording button at the top
+        # Recording button (full width, reduced height)
         self.recording_button = QPushButton('Start Recording', self)
+        self.set_button_style('ready')
         self.recording_button.clicked.connect(self.toggle_recording)
         main_layout.addWidget(self.recording_button)
 
@@ -210,17 +208,58 @@ class AudioTranscriberApp(QWidget):
         self.setLayout(main_layout)
         self.show()
 
+    def set_button_style(self, state):
+        """
+        Set the style of the recording button based on its state.
+        """
+        styles = {
+            'ready': {
+                'text': 'Start Recording',
+                'bg_color': '#1E5631',  # Darker green
+                'hover_color': '#2E8B57'  # Slightly lighter green for hover
+            },
+            'recording': {
+                'text': 'Stop Recording',
+                'bg_color': '#8B0000',  # Dark red
+                'hover_color': '#A52A2A'  # Slightly lighter red for hover
+            },
+            'transcribing': {
+                'text': 'Transcribing...',
+                'bg_color': '#8B4500',  # Dark orange
+                'hover_color': '#CD6600'  # Slightly lighter orange for hover
+            }
+        }
+
+        style = styles[state]
+        self.recording_button.setText(style['text'])
+        self.recording_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {style['bg_color']};
+                border: none;
+                color: white;
+                padding: 10px 20px;
+                text-align: center;
+                text-decoration: none;
+                font-size: 14px;
+                margin: 4px 2px;
+                border-radius: 8px;
+            }}
+            QPushButton:hover {{
+                background-color: {style['hover_color']};
+            }}
+        """)
+
     def toggle_recording(self):
         """
         Toggle the recording state and start/stop the recording process.
         """
         global recording_file_name
         if not is_recording:
-            self.recording_button.setText('Stop Recording')
+            self.set_button_style('recording')
             start_recording()
             self.progress_bar.setValue(0)
         else:
-            self.recording_button.setText('Start Recording')
+            self.set_button_style('transcribing')
             stop_recording()
             recording_finished.wait()
             self.worker = TranscriptionThread(recording_file_name)
@@ -241,6 +280,7 @@ class AudioTranscriberApp(QWidget):
         """
         self.text_refined_box.setText(refined_text)
         self.progress_bar.setValue(100)
+        self.set_button_style('ready')
 
     def copy_text(self, text_edit):
         """
