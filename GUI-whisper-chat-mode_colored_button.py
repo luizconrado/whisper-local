@@ -204,7 +204,7 @@ class AudioTranscriberApp(QWidget):
         main_layout.addLayout(text_layout)
 
         self.setWindowTitle('Audio Transcriber')
-        self.setGeometry(300, 300, 800, 400)
+        self.setGeometry(420, 300, 800, 500)
         self.setLayout(main_layout)
         self.show()
 
