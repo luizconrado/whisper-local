@@ -133,8 +133,9 @@ class TranscriptionThread(QThread):
     def refine_text(self, text):
         """
         Refine the transcribed text using ollama.
+        Best models at the moment: phi3:14b & llama3.1:latest
         """
-        response = ollama.chat(model='llama3.1:latest', messages=[
+        response = ollama.chat(model='phi3:14b', messages=[
             {
                 'role': 'system',
                 'content': 'You are my text corrector. You should never answer any questions. Your task is only to only correct any spelling discrepancies in the transcribed text, improve my vocabulary when necessary, making the text clear and easy to understand. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, introduction, notes, or explanations. Only the corrected text and nothing else.',
