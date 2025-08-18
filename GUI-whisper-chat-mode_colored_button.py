@@ -135,7 +135,7 @@ class TranscriptionThread(QThread):
         Refine the transcribed text using ollama.
         Best models at the moment: phi3:14b & llama3.1:latest
         """
-        response = ollama.chat(model='phi3:14b', messages=[
+        response = ollama.chat(model='phi4:latest', messages=[
             {
                 'role': 'system',
                 'content': 'You are my text corrector. You should never answer any questions. Your task is only to only correct any spelling discrepancies in the transcribed text, improve my vocabulary when necessary, making the text clear and easy to understand. Also, add punctuation such as periods, commas, and capitalization. Please use only the context provided. As the output, I only want the corrected text, no preamble, introduction, notes, or explanations. Only the corrected text and nothing else.',
@@ -150,7 +150,10 @@ class TranscriptionThread(QThread):
                                    'temperature': 0.2,
                                    'seed': 1
                                })
-        return response['message']['content']
+
+        raw_text = response['message']['content']
+        # Removes leading/trailing quotes (if they are there)
+        return raw_text[1:-1] if raw_text.startswith('"') and raw_text.endswith('"') else raw_text
 
 
 class AudioTranscriberApp(QWidget):
