@@ -2,7 +2,7 @@
 """
 Enhanced Hybrid Audio Transcriber Application - FINAL VERSION WITH SENSITIVITY CONFIG
 ====================================================================================
-This version includes comprehensive fixes for all crash issues while maintaining
+This version includes comprehensive fixes for crash issues while maintaining
 and enhancing all original functionality, PLUS dynamic sensitivity configuration.
 
 Key Fixes Applied:
@@ -29,7 +29,7 @@ Enhanced Features:
 All changes are marked with # FIX: and # SENSITIVITY: comments for traceability.
 
 ------------------------------------------------------------------------------------
-ADDITIONAL NOTE (STEP-1 FIX APPLIED HERE):
+ADDITIONAL NOTE (STEP-1 FIX WAS APPLIED):
 - To prevent intermittent 'bus error' crashes, we disable word-level timestamps
   in MLX Whisper calls by setting 'word_timestamps': False. This reduces memory
   pressure across repeated transcribe() calls in a long-lived GUI.
@@ -37,7 +37,13 @@ ADDITIONAL NOTE (STEP-1 FIX APPLIED HERE):
 - Because word-level probabilities may no longer be present, the confidence badge
   now falls back to segment-level avg_logprob (mapped to [0..1]) when available;
   otherwise it shows 'N/A' with a tooltip.
+
 ------------------------------------------------------------------------------------
+NEW CHANGE (REQUESTED): Sensitivity Preset Rebalance
+- The previous "Sensitive" preset is now the new "Balanced" preset.
+- The new "Sensitive" preset is one step MORE sensitive than the old Sensitive.
+- The "Original" preset remains unchanged.
+- A callback updates VAD sensitivity immediately when the user changes presets.
 """
 
 import sys
@@ -52,11 +58,11 @@ import uuid
 import time
 import json
 import os
-import math  # FIX-STEP1: for isnan checks in confidence display
+import math  # for isnan checks in confidence display
 from dataclasses import dataclass
 from functools import partial, wraps
 from contextlib import contextmanager
-from typing import List, Tuple, Optional, Dict, Any, Type, Union
+from typing import List, Tuple, Optional, Dict, Any
 from enum import Enum
 from contextvars import ContextVar
 
@@ -74,7 +80,7 @@ import ollama
 # Try to import additional libraries for audio processing
 try:
     import scipy.signal as signal
-    import scipy.io.wavfile as wavfile
+    import scipy.io.wavfile as wavfile  # noqa: F401  (kept for parity with original feature set)
     from scipy.ndimage import uniform_filter1d
 
     SCIPY_AVAILABLE = True
@@ -90,6 +96,7 @@ except ImportError:
     VAD_AVAILABLE = False
     logging.warning("webrtcvad not available. Using basic silence detection.")
 
+
 # --------------------------
 # Enhanced Logging Configuration
 # --------------------------
@@ -97,21 +104,15 @@ except ImportError:
 # Context variable for correlation ID tracking
 correlation_id: ContextVar[Optional[str]] = ContextVar('correlation_id', default=None)
 
-
 class CorrelationFilter(logging.Filter):
     """Add correlation ID to log records for request tracking."""
-
     def filter(self, record: logging.LogRecord) -> bool:
-        """Add correlation ID to the log record."""
         record.correlation_id = correlation_id.get() or 'no-correlation'
         return True
 
-
 class StructuredFormatter(logging.Formatter):
     """Format logs as structured JSON for better parsing."""
-
     def format(self, record: logging.LogRecord) -> str:
-        """Format log record as JSON."""
         log_data = {
             'timestamp': datetime.datetime.utcnow().isoformat(),
             'level': record.levelname,
@@ -122,38 +123,25 @@ class StructuredFormatter(logging.Formatter):
             'line': record.lineno,
             'correlation_id': getattr(record, 'correlation_id', 'no-correlation')
         }
-
-        # Add exception info if present
         if record.exc_info:
             log_data['exception'] = self.formatException(record.exc_info)
-
-        # Add extra fields
         for key, value in record.__dict__.items():
             if key not in ['name', 'msg', 'args', 'created', 'filename', 'funcName',
-                           'levelname', 'levelno', 'lineno', 'module', 'msecs',
-                           'message', 'pathname', 'process', 'processName', 'relativeCreated',
-                           'thread', 'threadName', 'exc_info', 'exc_text', 'stack_info',
-                           'correlation_id']:
+                          'levelname', 'levelno', 'lineno', 'module', 'msecs',
+                          'message', 'pathname', 'process', 'processName', 'relativeCreated',
+                          'thread', 'threadName', 'exc_info', 'exc_text', 'stack_info',
+                          'correlation_id']:
                 log_data[key] = value
-
         return json.dumps(log_data)
-
 
 def setup_logging(log_level: str = "INFO") -> None:
     """
     Configure logging with console output only.
-
-    Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     """
-    # Clear existing handlers
     root_logger = logging.getLogger()
     root_logger.handlers = []
-
-    # Set log level
     root_logger.setLevel(getattr(logging, log_level.upper()))
 
-    # Console handler with enhanced formatting
     console_handler = logging.StreamHandler(sys.stdout)
     console_format = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] - '
@@ -164,77 +152,49 @@ def setup_logging(log_level: str = "INFO") -> None:
     console_handler.addFilter(CorrelationFilter())
     root_logger.addHandler(console_handler)
 
-    # Also setup performance logger to use console
     perf_logger = logging.getLogger('performance')
     perf_logger.setLevel(logging.INFO)
-    perf_logger.propagate = True  # Let it use root logger's console handler
-
+    perf_logger.propagate = True  # use root logger's console handler
 
 def log_performance(func):
     """
     Decorator to log function performance metrics.
-
-    Usage:
-        @log_performance
-        def my_function():
-            # function code
     """
-
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # Set correlation ID if not set
         if correlation_id.get() is None:
             correlation_id.set(str(uuid.uuid4()))
 
         perf_logger = logging.getLogger('performance')
         start_time = time.perf_counter()
-
         try:
             result = func(*args, **kwargs)
             duration = time.perf_counter() - start_time
-
             perf_logger.info(
                 f"Function {func.__name__} completed",
-                extra={
-                    'function': func.__name__,
-                    'duration_ms': round(duration * 1000, 2),
-                    'status': 'success'
-                }
+                extra={'function': func.__name__, 'duration_ms': round(duration * 1000, 2), 'status': 'success'}
             )
             return result
-
         except Exception as e:
             duration = time.perf_counter() - start_time
             perf_logger.error(
                 f"Function {func.__name__} failed",
                 extra={
-                    'function': func.__name__,
-                    'duration_ms': round(duration * 1000, 2),
-                    'status': 'error',
-                    'error': str(e),
-                    'error_type': type(e).__name__
+                    'function': func.__name__, 'duration_ms': round(duration * 1000, 2),
+                    'status': 'error', 'error': str(e), 'error_type': type(e).__name__
                 }
             )
             raise
-
     return wrapper
-
 
 def set_correlation_id(new_id: Optional[str] = None) -> str:
     """
     Set a new correlation ID for the current context.
-
-    Args:
-        new_id: Optional correlation ID. If None, generates a new UUID.
-
-    Returns:
-        The correlation ID that was set.
     """
     if new_id is None:
         new_id = str(uuid.uuid4())
     correlation_id.set(new_id)
     return new_id
-
 
 # Initialize logging with default settings (console only)
 setup_logging(log_level=os.getenv('LOG_LEVEL', 'INFO'))
@@ -250,69 +210,41 @@ logger.info("Enhanced logging system initialized")
 
 class TranscriberError(Exception):
     """Base exception for all transcriber-specific errors."""
-
     def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
-        """
-        Initialize the exception with message and optional details.
-
-        Args:
-            message: Error message
-            details: Optional dictionary with additional error context
-        """
         super().__init__(message)
         self.message = message
         self.details = details or {}
         self.correlation_id = correlation_id.get()
-
-        # Log the error
         logger.error(
             f"{self.__class__.__name__}: {message}",
             extra={'error_details': self.details, 'correlation_id': self.correlation_id}
         )
 
-
 class AudioProcessingError(TranscriberError):
-    """Raised when audio processing operations fail."""
     pass
-
 
 class RecordingError(TranscriberError):
-    """Raised when audio recording fails."""
     pass
-
 
 class TranscriptionError(TranscriberError):
-    """Raised when transcription fails."""
     pass
-
 
 class RefinementError(TranscriberError):
-    """Raised when text refinement fails."""
     pass
-
 
 class ModelNotAvailableError(TranscriberError):
-    """Raised when the requested model is not available."""
     pass
-
 
 class ConfigurationError(TranscriberError):
-    """Raised for configuration-related issues."""
     pass
-
 
 class ThreadManagementError(TranscriberError):
-    """Raised for thread management issues."""
     pass
-
 
 class ResourceError(TranscriberError):
-    """Raised when system resources are unavailable."""
     pass
 
-
 class ValidationError(TranscriberError):
-    """Raised when input validation fails."""
     pass
 
 
@@ -322,15 +254,14 @@ class ValidationError(TranscriberError):
 
 class SensitivityLevel(Enum):
     """Three sensitivity presets for different recording environments."""
-    ORIGINAL = "original"  # Conservative - original settings
-    BALANCED = "balanced"  # Medium - better for normal speech (current PATCHED)
-    SENSITIVE = "sensitive"  # High - for very quiet speakers
+    ORIGINAL = "original"   # Conservative - original settings
+    BALANCED = "balanced"   # NOW uses the previous Sensitive settings
+    SENSITIVE = "sensitive" # New ultra-sensitive (more sensitive than old Sensitive)
 
 
 @dataclass
 class SensitivityConfig:
     """Configuration values for each sensitivity level."""
-
     # Audio Quality Thresholds
     quality_silence_poor: float
     quality_silence_fair: float
@@ -340,8 +271,8 @@ class SensitivityConfig:
 
     # Audio Processing Parameters
     silence_threshold: float
-    silence_multiplier: float  # Multiplier for silence detection
-    noise_percentile: int  # Percentile for noise floor estimation
+    silence_multiplier: float     # Multiplier for silence detection (used in analysis)
+    noise_percentile: int         # Percentile for noise floor estimation
 
     # Voice Amplification
     low_voice_amp: float
@@ -349,15 +280,15 @@ class SensitivityConfig:
     low_freq_boost: float
     male_freq_boost: float
 
-    # Noise Reduction
+    # Noise Reduction (kept for future feature toggles)
     noise_reduce_strength: float
 
     # VAD Settings
-    vad_aggressiveness: int  # 0-3, higher = more aggressive
-    vad_energy_percentile: int  # Energy threshold percentile
+    vad_aggressiveness: int       # 0-3, lower = more permissive/sensitive
+    vad_energy_percentile: int    # Energy threshold percentile
 
     # Quality check adjustment
-    min_rms_threshold: float  # Minimum RMS for "very quiet" detection
+    min_rms_threshold: float      # Minimum RMS for "very quiet" detection
 
 
 class GlobalAudioConfig:
@@ -365,7 +296,6 @@ class GlobalAudioConfig:
     Global configuration manager for audio sensitivity.
     Thread-safe singleton pattern.
     """
-
     _instance = None
     _lock = threading.Lock()
 
@@ -380,116 +310,103 @@ class GlobalAudioConfig:
     def __init__(self):
         if self._initialized:
             return
-
         self._initialized = True
-        self._current_level = SensitivityLevel.BALANCED  # Default to current PATCHED behavior
+        self._current_level = SensitivityLevel.BALANCED  # Default to BALANCED
         self._configs = self._create_configs()
         self._callbacks = []  # Callbacks for config changes
 
     def _create_configs(self) -> Dict[SensitivityLevel, SensitivityConfig]:
-        """Create configuration presets for each sensitivity level."""
+        """Create configuration presets for each sensitivity level.
 
+        Changes requested:
+        - BALANCED := previous SENSITIVE values (more permissive to quiet speech)
+        - SENSITIVE := one notch more sensitive than the old SENSITIVE
+        - ORIGINAL unchanged
+        """
         return {
             SensitivityLevel.ORIGINAL: SensitivityConfig(
-                # Original conservative thresholds (from original v4)
+                # Original conservative thresholds (unchanged)
                 quality_silence_poor=0.7,
                 quality_silence_fair=0.5,
                 quality_noise_high=0.1,
                 quality_noise_low=0.05,
                 quality_dynamic_excellent=0.3,
 
-                # Original processing
                 silence_threshold=0.003,
-                silence_multiplier=1.0,  # No multiplier (original behavior)
-                noise_percentile=10,  # Original percentile
+                silence_multiplier=1.0,
+                noise_percentile=10,
 
-                # Original amplification
                 low_voice_amp=2.5,
                 male_voice_amp=1.8,
                 low_freq_boost=2.0,
                 male_freq_boost=1.7,
 
-                # Minimal noise reduction
                 noise_reduce_strength=0.2,
 
-                # Least aggressive VAD
                 vad_aggressiveness=0,
                 vad_energy_percentile=15,
 
-                # Original threshold
                 min_rms_threshold=0.01
             ),
 
+            # BALANCED := old SENSITIVE
             SensitivityLevel.BALANCED: SensitivityConfig(
-                # Improved thresholds (current PATCHED values)
-                quality_silence_poor=0.85,
-                quality_silence_fair=0.7,
-                quality_noise_high=0.2,
-                quality_noise_low=0.1,
-                quality_dynamic_excellent=0.2,
+                quality_silence_poor=0.9,
+                quality_silence_fair=0.8,
+                quality_noise_high=0.3,
+                quality_noise_low=0.15,
+                quality_dynamic_excellent=0.15,
 
-                # Better speech detection (current PATCHED)
-                silence_threshold=0.003,
-                silence_multiplier=3.0,  # Current PATCHED multiplier
-                noise_percentile=5,  # Current PATCHED percentile
+                silence_threshold=0.001,
+                silence_multiplier=5.0,
+                noise_percentile=3,
 
-                # Same amplification as original
-                low_voice_amp=2.5,
-                male_voice_amp=1.8,
-                low_freq_boost=2.0,
-                male_freq_boost=1.7,
+                low_voice_amp=4.0,
+                male_voice_amp=2.5,
+                low_freq_boost=2.5,
+                male_freq_boost=2.0,
 
-                # Moderate noise reduction
-                noise_reduce_strength=0.3,
+                noise_reduce_strength=0.5,
 
-                # Balanced VAD
-                vad_aggressiveness=0,  # Keep least aggressive
-                vad_energy_percentile=15,
+                vad_aggressiveness=1,      # slightly more aggressive than 0
+                vad_energy_percentile=8,
 
-                # Adjusted threshold (current PATCHED)
-                min_rms_threshold=0.008
+                min_rms_threshold=0.005
             ),
 
+            # New SENSITIVE := one notch more sensitive than old SENSITIVE
             SensitivityLevel.SENSITIVE: SensitivityConfig(
-                # Very lenient thresholds for quiet speech
-                quality_silence_poor=0.9,  # Only almost complete silence is poor
-                quality_silence_fair=0.8,  # Very high tolerance
-                quality_noise_high=0.3,  # Less sensitive to noise
-                quality_noise_low=0.15,  # More realistic for amplified audio
-                quality_dynamic_excellent=0.15,  # Easier to achieve
+                quality_silence_poor=0.92,      # more lenient than Balanced
+                quality_silence_fair=0.85,
+                quality_noise_high=0.35,
+                quality_noise_low=0.20,
+                quality_dynamic_excellent=0.12,
 
-                # Ultra-sensitive speech detection
-                silence_threshold=0.001,  # Very sensitive
-                silence_multiplier=5.0,  # Strong distinction
-                noise_percentile=3,  # Lower percentile
+                silence_threshold=0.0008,       # lower threshold -> more speech retained
+                silence_multiplier=6.0,
+                noise_percentile=2,
 
-                # Maximum amplification
-                low_voice_amp=4.0,  # Higher amplification
-                male_voice_amp=2.5,  # Stronger boost
-                low_freq_boost=2.5,  # More bass boost
-                male_freq_boost=2.0,  # More formant boost
+                low_voice_amp=5.0,
+                male_voice_amp=3.0,
+                low_freq_boost=3.0,
+                male_freq_boost=2.2,
 
-                # Aggressive noise reduction to compensate
-                noise_reduce_strength=0.5,  # Stronger noise reduction
+                noise_reduce_strength=0.55,
 
-                # More aggressive VAD
-                vad_aggressiveness=1,  # Slightly more aggressive
-                vad_energy_percentile=8,  # Lower threshold
+                vad_aggressiveness=0,           # most permissive WebRTC VAD mode
+                vad_energy_percentile=5,
 
-                # Very low threshold
-                min_rms_threshold=0.005  # Detect even quieter speech
+                min_rms_threshold=0.004
             )
         }
 
     @property
     def current_level(self) -> SensitivityLevel:
-        """Get current sensitivity level."""
         with self._lock:
             return self._current_level
 
     @current_level.setter
     def current_level(self, level: SensitivityLevel):
-        """Set sensitivity level and notify callbacks."""
         with self._lock:
             if level != self._current_level:
                 old_level = self._current_level
@@ -499,17 +416,14 @@ class GlobalAudioConfig:
 
     @property
     def config(self) -> SensitivityConfig:
-        """Get current configuration."""
         with self._lock:
             return self._configs[self._current_level]
 
     def register_callback(self, callback):
-        """Register a callback for configuration changes."""
         with self._lock:
             self._callbacks.append(callback)
 
     def _notify_callbacks(self):
-        """Notify all callbacks of configuration change."""
         for callback in self._callbacks:
             try:
                 callback(self._current_level, self.config)
@@ -517,7 +431,6 @@ class GlobalAudioConfig:
                 logger.error(f"Error in config callback: {e}")
 
     def get_config_value(self, attr_name: str, default=None):
-        """Safely get a config value with fallback."""
         try:
             return getattr(self.config, attr_name, default)
         except Exception as e:
@@ -533,59 +446,34 @@ GLOBAL_AUDIO_CONFIG = GlobalAudioConfig()
 # Audio Configuration
 # --------------------------
 class AudioConfig:
-    """Enhanced audio configuration with preprocessing parameters.
-
-    Attributes:
-        SAMPLE_RATE: Recording sample rate (44100 Hz)
-        WHISPER_SAMPLE_RATE: Whisper's optimal sample rate (16000 Hz)
-        FORMAT: Audio format (16-bit PCM)
-        CHANNELS: Number of audio channels (mono)
-        CHUNK_SIZE: Buffer size for audio streaming
-
-        Noise reduction parameters:
-        NOISE_REDUCE_STRENGTH: Gentle noise reduction (0.2)
-        NORMALIZE_TARGET_LEVEL: Target normalization level (-18.0 dB)
-        SILENCE_THRESHOLD: Threshold for silence detection (0.003)
-        MIN_SILENCE_DURATION: Minimum silence duration (0.4s)
-
-        Voice optimization parameters (for moderate-to-low volume male voices):
-        LOW_VOICE_AMPLIFICATION: Amplification for very quiet speech (2.5x)
-        MALE_VOICE_AMPLIFICATION: Amplification for male voices (1.8x)
-        LOW_FREQ_BOOST: Boost for low frequencies 80-250Hz (2.0x)
-        MALE_FREQ_BOOST: Boost for male speech formants 300-800Hz (1.7x)
-
-        VAD parameters:
-        VAD_FRAME_DURATION: Frame duration for VAD analysis (30ms)
-        VAD_AGGRESSIVENESS: VAD sensitivity level (0 = least aggressive)
-    """
-    SAMPLE_RATE = 44100  # Recording sample rate
-    WHISPER_SAMPLE_RATE = 16000  # Whisper's optimal sample rate
+    """Enhanced audio configuration with preprocessing parameters."""
+    SAMPLE_RATE = 44100
+    WHISPER_SAMPLE_RATE = 16000
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
     CHUNK_SIZE = 1024
 
-    # Audio preprocessing parameters (optimized for moderate-to-low male voice)
-    NOISE_REDUCE_STRENGTH = 0.2  # Very gentle to preserve all speech nuances
-    NORMALIZE_TARGET_LEVEL = -18.0  # dB - slightly higher for quiet speakers
-    SILENCE_THRESHOLD = 0.003  # Very sensitive for consistently low volume
-    MIN_SILENCE_DURATION = 0.4  # Slightly longer for natural speech patterns
+    # Audio preprocessing parameters
+    NOISE_REDUCE_STRENGTH = 0.2
+    NORMALIZE_TARGET_LEVEL = -18.0
+    SILENCE_THRESHOLD = 0.003
+    MIN_SILENCE_DURATION = 0.4
 
     # Male voice optimization (moderate-to-low volume)
-    LOW_VOICE_AMPLIFICATION = 2.5  # Higher amplification for consistent low volume
-    MALE_VOICE_AMPLIFICATION = 1.8  # Additional boost specifically for male voices
-    LOW_FREQ_BOOST = 2.0  # Stronger boost for male voice fundamentals (80-250Hz)
-    MALE_FREQ_BOOST = 1.7  # Boost male speech formants (300-800Hz)
+    LOW_VOICE_AMPLIFICATION = 2.5
+    MALE_VOICE_AMPLIFICATION = 1.8
+    LOW_FREQ_BOOST = 2.0
+    MALE_FREQ_BOOST = 1.7
 
-    # VAD parameters (optimized for soft-spoken male voice)
-    VAD_FRAME_DURATION = 30  # ms
-    VAD_AGGRESSIVENESS = 0  # Least aggressive - catches all quiet speech
+    # VAD parameters
+    VAD_FRAME_DURATION = 30
+    VAD_AGGRESSIVENESS = 0
 
 
 # --------------------------
 # Audio Quality Assessment
 # --------------------------
 class AudioQuality(Enum):
-    """Audio quality levels for context in LLM prompts."""
     EXCELLENT = "excellent"
     GOOD = "good"
     FAIR = "fair"
@@ -594,7 +482,6 @@ class AudioQuality(Enum):
 
 @dataclass
 class AudioAnalysis:
-    """Results of audio quality analysis."""
     quality: AudioQuality
     noise_level: float
     silence_ratio: float
@@ -606,56 +493,49 @@ class AudioAnalysis:
 # --------------------------
 # Audio Processing Constants
 # --------------------------
+# (Kept for parity with the original codebase; per-level configs are used in practice.)
+QUALITY_SILENCE_THRESHOLD_POOR = 0.85
+QUALITY_SILENCE_THRESHOLD_FAIR = 0.7
+QUALITY_NOISE_THRESHOLD_HIGH = 0.2
+QUALITY_NOISE_THRESHOLD_LOW = 0.1
+QUALITY_DYNAMIC_RANGE_EXCELLENT = 0.2
+QUALITY_CLIPPING_THRESHOLD = 0.95
 
-# Quality thresholds for audio analysis
-QUALITY_SILENCE_THRESHOLD_POOR = 0.85  # >70% silence = poor quality
-QUALITY_SILENCE_THRESHOLD_FAIR = 0.7  # >50% silence = fair quality
-QUALITY_NOISE_THRESHOLD_HIGH = 0.2  # >0.1 noise level = fair quality
-QUALITY_NOISE_THRESHOLD_LOW = 0.1  # <0.05 noise level = excellent
-QUALITY_DYNAMIC_RANGE_EXCELLENT = 0.2  # >0.3 dynamic range = excellent
-QUALITY_CLIPPING_THRESHOLD = 0.95  # >0.95 amplitude = clipping
+CHUNK_MIN_DURATION_DEFAULT = 15.0
+CHUNK_MAX_DURATION_DEFAULT = 45.0
+CHUNK_MIN_DURATION_LONG = 15.0
+CHUNK_MAX_DURATION_LONG = 35.0
+CHUNK_OVERLAP_DURATION = 3.0
+CHUNK_SILENCE_GAP_THRESHOLD = 1.0
+CHUNK_MERGE_THRESHOLD = 15.0
 
-# Audio chunking parameters
-CHUNK_MIN_DURATION_DEFAULT = 15.0  # Default minimum chunk duration (seconds)
-CHUNK_MAX_DURATION_DEFAULT = 45.0  # Default maximum chunk duration (seconds)
-CHUNK_MIN_DURATION_LONG = 15.0  # Min duration for long audio (>10 min)
-CHUNK_MAX_DURATION_LONG = 35.0  # Max duration for long audio (>10 min)
-CHUNK_OVERLAP_DURATION = 3.0  # Overlap between chunks (seconds)
-CHUNK_SILENCE_GAP_THRESHOLD = 1.0  # Min silence gap for natural breaks (seconds)
-CHUNK_MERGE_THRESHOLD = 15.0  # Min final chunk size to avoid merging
+VAD_WINDOW_SIZE_MS = 25
+VAD_HOP_SIZE_MS = 10
+VAD_ENERGY_PERCENTILE = 15
+VAD_MAX_OVERLAP_WORDS = 10
 
-# Voice activity detection parameters
-VAD_WINDOW_SIZE_MS = 25  # VAD analysis window size (milliseconds)
-VAD_HOP_SIZE_MS = 10  # VAD hop size (milliseconds)
-VAD_ENERGY_PERCENTILE = 15  # Percentile for energy threshold (low for quiet speech)
-VAD_MAX_OVERLAP_WORDS = 10  # Max words to check for overlap removal
+AUDIO_WINDOW_SIZE_SEC = 0.1
+AUDIO_PERCENTILE_99 = 99
+AUDIO_PERCENTILE_1 = 1
+AUDIO_PERCENTILE_10 = 10
 
-# Audio preprocessing parameters
-AUDIO_WINDOW_SIZE_SEC = 0.1  # RMS calculation window size (seconds)
-AUDIO_PERCENTILE_99 = 99  # High percentile for dynamic range
-AUDIO_PERCENTILE_1 = 1  # Low percentile for dynamic range
-AUDIO_PERCENTILE_10 = 10  # Noise level estimation percentile
+MALE_VOICE_FREQ_RATIO = 0.7
+VERY_LOW_VOICE_FREQ_RATIO = 0.85
 
-# Male voice detection thresholds
-MALE_VOICE_FREQ_RATIO = 0.7  # Low freq energy ratio for male voice detection
-VERY_LOW_VOICE_FREQ_RATIO = 0.85  # Ratio for very deep/quiet voice detection
+FREQ_MALE_FUNDAMENTAL_LOW = 50
+FREQ_MALE_FUNDAMENTAL_HIGH = 250
+FREQ_MALE_FORMANT_LOW = 300
+FREQ_MALE_FORMANT_HIGH = 800
+FREQ_MALE_SPEECH_LOW = 80
+FREQ_MALE_SPEECH_HIGH = 800
 
-# Audio filtering frequency ranges (Hz)
-FREQ_MALE_FUNDAMENTAL_LOW = 50  # Male fundamental frequency range start
-FREQ_MALE_FUNDAMENTAL_HIGH = 250  # Male fundamental frequency range end
-FREQ_MALE_FORMANT_LOW = 300  # Male formant frequency range start
-FREQ_MALE_FORMANT_HIGH = 800  # Male formant frequency range end
-FREQ_MALE_SPEECH_LOW = 80  # Male speech frequency range start
-FREQ_MALE_SPEECH_HIGH = 800  # Male speech frequency range end
-
-# Filter parameters
-FILTER_ORDER_MINIMAL = 1  # Minimal filtering for very low voices
-FILTER_ORDER_GENTLE = 2  # Gentle filtering for male voices
-FILTER_ORDER_MODERATE = 3  # Moderate filtering for standard voices
-FILTER_CUTOFF_VERY_LOW = 50  # Low cutoff for very deep voices
-FILTER_CUTOFF_MALE = 55  # Low cutoff for male voices
-FILTER_CUTOFF_STANDARD = 70  # Standard low cutoff
-FILTER_CUTOFF_HIGH = 8000  # High frequency cutoff
+FILTER_ORDER_MINIMAL = 1
+FILTER_ORDER_GENTLE = 2
+FILTER_ORDER_MODERATE = 3
+FILTER_CUTOFF_VERY_LOW = 50
+FILTER_CUTOFF_MALE = 55
+FILTER_CUTOFF_STANDARD = 70
+FILTER_CUTOFF_HIGH = 8000
 
 
 # --------------------------
@@ -673,7 +553,6 @@ class ModelConfig:
 
     @classmethod
     def get_default_configs(cls):
-        """Returns model configurations for single-step refinement."""
         return {
             'phi4:latest': cls(
                 name='phi4:latest',
@@ -759,7 +638,6 @@ class ModelConfig:
 
     @classmethod
     def get_config(cls, model_name: str):
-        """Retrieve configuration with fallback to default."""
         configs = cls.get_default_configs()
         if model_name in configs:
             return configs[model_name]
@@ -772,60 +650,42 @@ class ModelConfig:
 # Enhanced Audio Processor
 # --------------------------
 class AudioProcessor:
-    """Advanced audio preprocessing pipeline optimized for MLX Whisper transcription.
-
-    Features:
-    - Audio quality analysis and classification
-    - Intelligent silence removal preserving speech
-    - Noise reduction with male voice frequency preservation
-    - Adaptive normalization for low-volume speakers
-    - High-quality resampling to 16kHz for optimal Whisper performance
-    """
-
+    """Advanced audio preprocessing pipeline optimized for MLX Whisper transcription."""
     def __init__(self) -> None:
         self.logger = logging.getLogger(f"{__name__}.AudioProcessor")
 
     def analyze_audio_quality(self, audio_data: np.ndarray, sample_rate: int) -> AudioAnalysis:
         """Analyze audio quality to provide context for LLM refinement."""
-        # SENSITIVITY: Get dynamic configuration
         config = GLOBAL_AUDIO_CONFIG.config
-
         try:
-            # Calculate basic metrics
             duration = len(audio_data) / sample_rate
             rms = np.sqrt(np.mean(audio_data ** 2))
 
-            # SENSITIVITY: Detect silence regions using dynamic threshold
             silence_threshold = config.silence_threshold * config.silence_multiplier
             silence_mask = np.abs(audio_data) < silence_threshold
             silence_ratio = np.sum(silence_mask) / len(audio_data)
 
-            # Calculate dynamic range (difference between loud and quiet parts)
             percentile_99 = np.percentile(np.abs(audio_data), AUDIO_PERCENTILE_99)
             percentile_1 = np.percentile(np.abs(audio_data), AUDIO_PERCENTILE_1)
             dynamic_range = percentile_99 - percentile_1
 
-            # Detect clipping (audio exceeding maximum amplitude)
-            max_value = np.max(np.abs(audio_data))  # Peak amplitude detection
+            max_value = np.max(np.abs(audio_data))
             clipping_detected = max_value > QUALITY_CLIPPING_THRESHOLD
 
-            # SENSITIVITY: Estimate noise floor using dynamic percentile
             noise_level = np.percentile(np.abs(audio_data), config.noise_percentile)
 
-            # SENSITIVITY: Determine overall quality based on dynamic thresholds
-            # Check for very low volume first
             is_very_quiet = rms < config.min_rms_threshold
 
             if clipping_detected or silence_ratio > config.quality_silence_poor:
                 quality = AudioQuality.POOR
             elif is_very_quiet:
-                quality = AudioQuality.FAIR  # Low volume gets fair, not poor
+                quality = AudioQuality.FAIR
             elif (noise_level > config.quality_noise_high or
                   silence_ratio > config.quality_silence_fair):
                 quality = AudioQuality.FAIR
             elif (dynamic_range > config.quality_dynamic_excellent and
                   noise_level < config.quality_noise_low and
-                  silence_ratio < 0.5):  # Need <50% silence for excellent
+                  silence_ratio < 0.5):
                 quality = AudioQuality.EXCELLENT
             else:
                 quality = AudioQuality.GOOD
@@ -853,29 +713,24 @@ class AudioProcessor:
         """Resample audio to target sample rate."""
         if orig_rate == target_rate:
             return audio_data
-
         if SCIPY_AVAILABLE:
-            # High-quality resampling using scipy
             num_samples = int(len(audio_data) * target_rate / orig_rate)
             resampled = signal.resample(audio_data, num_samples)
             self.logger.info(f"Resampled audio from {orig_rate}Hz to {target_rate}Hz")
             return resampled.astype(np.float32)
         else:
-            # Simple linear interpolation fallback
             ratio = target_rate / orig_rate
             indices = np.arange(0, len(audio_data), 1 / ratio)
             indices = indices[indices < len(audio_data)]
             resampled = np.interp(indices, np.arange(len(audio_data)), audio_data)
-            self.logger.info(f"Resampled audio using linear interpolation")
+            self.logger.info("Resampled audio using linear interpolation")
             return resampled.astype(np.float32)
 
     def remove_silence(self, audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
         """Remove long silent periods from audio."""
         try:
-            # Calculate RMS energy in sliding windows (100ms windows with 50ms hop)
-            # This allows detection of speech vs silence regions
-            window_size = int(AUDIO_WINDOW_SIZE_SEC * sample_rate)  # 100ms windows
-            hop_size = window_size // 2  # 50ms hop for overlap
+            window_size = int(AUDIO_WINDOW_SIZE_SEC * sample_rate)  # 100ms
+            hop_size = window_size // 2                           # 50ms
 
             rms_values = []
             for i in range(0, len(audio_data) - window_size, hop_size):
@@ -883,16 +738,13 @@ class AudioProcessor:
                 rms = np.sqrt(np.mean(window ** 2))
                 rms_values.append(rms)
 
-            # SENSITIVITY: Identify non-silent regions with dynamic threshold
             config = GLOBAL_AUDIO_CONFIG.config
             threshold = config.silence_threshold
             non_silent = np.array(rms_values) > threshold
 
-            # Apply smoothing filter to avoid cutting speech at word boundaries
             if SCIPY_AVAILABLE:
                 non_silent = uniform_filter1d(non_silent.astype(float), size=5) > 0.3
 
-            # Create mask for original audio
             mask = np.zeros(len(audio_data), dtype=bool)
             for i, is_speech in enumerate(non_silent):
                 start_idx = i * hop_size
@@ -901,15 +753,12 @@ class AudioProcessor:
                     mask[start_idx:end_idx] = True
 
             cleaned_audio = audio_data[mask]
-
-            # Handle case where all audio is removed
             if len(cleaned_audio) == 0:
                 self.logger.warning("All audio was silence, keeping minimal audio")
                 return audio_data[:min(1000, len(audio_data))]
 
             reduction_ratio = 1 - (len(cleaned_audio) / len(audio_data))
             self.logger.info(f"Removed {reduction_ratio:.1%} of audio as silence")
-
             return cleaned_audio
         except Exception as e:
             self.logger.error(f"Error removing silence: {e}")
@@ -918,16 +767,13 @@ class AudioProcessor:
     def normalize_audio(self, audio_data: np.ndarray) -> np.ndarray:
         """Normalize audio to target level with low voice optimization."""
         try:
-            # Calculate current RMS
             rms = np.sqrt(np.mean(audio_data ** 2))
             if rms == 0:
                 return audio_data
 
-            # Detect voice characteristics for male moderate-to-low volume
             is_consistently_low = rms < 0.04
             is_very_low = rms < 0.015
 
-            # SENSITIVITY: Apply appropriate amplification based on voice level
             config = GLOBAL_AUDIO_CONFIG.config
             if is_very_low:
                 amplification = config.low_voice_amp
@@ -947,8 +793,8 @@ class AudioProcessor:
                 target_rms = 0.13
             else:
                 target_rms = 0.1
-            scale_factor = target_rms / rms
 
+            scale_factor = target_rms / rms
             normalized = audio_data * scale_factor
 
             if np.any(np.isnan(normalized)):
@@ -956,7 +802,6 @@ class AudioProcessor:
                 return audio_data
 
             normalized = np.clip(normalized, -0.95, 0.95)
-
             self.logger.info(f"Normalized audio with scale factor: {scale_factor:.3f}")
             return normalized
         except Exception as e:
@@ -964,18 +809,16 @@ class AudioProcessor:
             return audio_data
 
     def reduce_noise(self, audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
-        """Apply basic noise reduction."""
+        """Apply basic noise reduction via bandpass filtering with low-voice preservation."""
         try:
             if not SCIPY_AVAILABLE:
                 return audio_data
 
-            # Apply gentle bandpass filter optimized for low voices
             noise_duration = min(int(0.5 * sample_rate), len(audio_data) // 4)
-            _ = audio_data[:noise_duration]  # noise_sample not used explicitly
+            _ = audio_data[:noise_duration]  # placeholder; noise estimation not explicitly used here
 
             nyquist = sample_rate / 2
 
-            # Detect voice characteristics for male speech optimization
             low_freq_energy = np.mean(np.abs(audio_data[:int(0.1 * sample_rate)]))
             total_energy = np.mean(np.abs(audio_data))
 
@@ -1021,7 +864,6 @@ class AudioProcessor:
                     self.logger.info(f"Applied male voice frequency boost: {config.male_freq_boost}x")
 
                 filtered = np.clip(filtered, -0.95, 0.95)
-
                 self.logger.info("Applied optimized bandpass filter")
                 return filtered.astype(np.float32)
             except Exception as filter_error:
@@ -1046,9 +888,7 @@ class AudioProcessor:
             audio_np = self.remove_silence(audio_np, AudioConfig.SAMPLE_RATE)
             audio_np = self.reduce_noise(audio_np, AudioConfig.SAMPLE_RATE)
             audio_np = self.normalize_audio(audio_np)
-            audio_np = self.resample_audio(
-                audio_np, AudioConfig.SAMPLE_RATE, AudioConfig.WHISPER_SAMPLE_RATE
-            )
+            audio_np = self.resample_audio(audio_np, AudioConfig.SAMPLE_RATE, AudioConfig.WHISPER_SAMPLE_RATE)
 
             return audio_np, analysis
 
@@ -1071,10 +911,10 @@ class AudioProcessor:
 # --------------------------
 class VoiceActivityDetector:
     """Intelligent voice activity detection for better chunking."""
-
     def __init__(self):
         self.logger = logging.getLogger(f"{__name__}.VAD")
         self.vad = None
+        # SENSITIVITY: Use dynamic VAD aggressiveness from current config
         if VAD_AVAILABLE:
             config = GLOBAL_AUDIO_CONFIG.config
             self.vad = webrtcvad.Vad(config.vad_aggressiveness)
@@ -1095,7 +935,7 @@ class VoiceActivityDetector:
             return [(0.0, duration)]
 
     def _webrtc_vad(self, audio_data: np.ndarray, sample_rate: int) -> List[Tuple[float, float]]:
-        """Use WebRTC VAD for speech detection."""
+        """Use WebRTC VAD for speech detection (16kHz only)."""
         frame_duration_ms = AudioConfig.VAD_FRAME_DURATION
         frame_length = int(sample_rate * frame_duration_ms / 1000)
 
@@ -1126,7 +966,7 @@ class VoiceActivityDetector:
     def _energy_vad(self, audio_data: np.ndarray, sample_rate: int) -> List[Tuple[float, float]]:
         """Energy-based VAD fallback optimized for low-volume speech."""
         window_size = int(VAD_WINDOW_SIZE_MS / 1000.0 * sample_rate)  # 25ms
-        hop_size = int(VAD_HOP_SIZE_MS / 1000.0 * sample_rate)  # 10ms
+        hop_size = int(VAD_HOP_SIZE_MS / 1000.0 * sample_rate)        # 10ms
 
         energies = []
         for i in range(0, len(audio_data) - window_size, hop_size):
@@ -1159,8 +999,7 @@ class VoiceActivityDetector:
         return speech_segments
 
     def get_optimal_chunks(self, audio_data: np.ndarray, sample_rate: int,
-                           min_chunk_duration: float = 15.0, max_chunk_duration: float = 45.0) -> List[
-        Tuple[float, float]]:
+                           min_chunk_duration: float = 15.0, max_chunk_duration: float = 45.0) -> List[Tuple[float, float]]:
         """Get optimal chunk boundaries with minimum duration and natural pause detection."""
         try:
             speech_segments = self.detect_speech_segments(audio_data, sample_rate)
@@ -1200,8 +1039,7 @@ class VoiceActivityDetector:
                 else:
                     chunks.append((current_chunk_start, total_duration))
 
-            self.logger.info(
-                f"Created {len(chunks)} optimal chunks (min: {min_chunk_duration}s, max: {max_chunk_duration}s)")
+            self.logger.info(f"Created {len(chunks)} optimal chunks (min: {min_chunk_duration}s, max: {max_chunk_duration}s)")
             return chunks
 
         except Exception as e:
@@ -1219,17 +1057,30 @@ class VoiceActivityDetector:
 # --------------------------
 class AppState(QObject):
     """Enhanced application state with robust thread tracking and audio processing context."""
-
     def __init__(self):
         super().__init__()
         self._lock = threading.Lock()
         self._is_recording = False
         self.audio_buffer = bytes()
         self.active_threads = 0
-        self._thread_registry = {}  # FIX: Track threads by ID with metadata
+        self._thread_registry = {}  # Track threads by ID with metadata
         self.audio_processor = AudioProcessor()
         self.vad = VoiceActivityDetector()
         self.last_audio_analysis: Optional[AudioAnalysis] = None
+
+        # SENSITIVITY: react immediately to sensitivity preset changes (recreate VAD with new aggressiveness)
+        try:
+            GLOBAL_AUDIO_CONFIG.register_callback(self._on_config_changed)
+        except Exception as e:
+            logger.error(f"Failed to register sensitivity change callback: {e}")
+
+    def _on_config_changed(self, level: SensitivityLevel, config: SensitivityConfig):
+        """Callback invoked when the sensitivity level changes."""
+        try:
+            self.vad = VoiceActivityDetector()
+            logger.info(f"AppState VAD re-initialized for sensitivity '{level.value}'")
+        except Exception as e:
+            logger.error(f"Failed to reinitialize VAD on sensitivity change: {e}")
 
     @property
     def is_recording(self):
@@ -1242,28 +1093,20 @@ class AppState(QObject):
             self._is_recording = value
 
     def register_thread(self, thread_id: str):
-        """Register a new active thread with metadata."""
         with self._lock:
-            self._thread_registry[thread_id] = {
-                'start_time': datetime.datetime.now(),
-                'status': 'active'
-            }
-            self.active_threads = len([t for t in self._thread_registry.values()
-                                       if t['status'] == 'active'])
+            self._thread_registry[thread_id] = {'start_time': datetime.datetime.now(), 'status': 'active'}
+            self.active_threads = len([t for t in self._thread_registry.values() if t['status'] == 'active'])
             logger.info(f"Thread {thread_id} registered. Active threads: {self.active_threads}")
 
     def unregister_thread(self, thread_id: str):
-        """Unregister a thread (completed or failed)."""
         with self._lock:
             if thread_id in self._thread_registry:
                 self._thread_registry[thread_id]['status'] = 'completed'
                 self._thread_registry[thread_id]['end_time'] = datetime.datetime.now()
-            self.active_threads = len([t for t in self._thread_registry.values()
-                                       if t['status'] == 'active'])
+            self.active_threads = len([t for t in self._thread_registry.values() if t['status'] == 'active'])
             logger.info(f"Thread {thread_id} unregistered. Active threads: {self.active_threads}")
 
     def cleanup_stale_threads(self, timeout_seconds: int = 300):
-        """Clean up threads that have been running too long."""
         with self._lock:
             now = datetime.datetime.now()
             for thread_id, info in list(self._thread_registry.items()):
@@ -1272,8 +1115,7 @@ class AppState(QObject):
                     if runtime > timeout_seconds:
                         logger.warning(f"Thread {thread_id} timed out after {runtime:.1f}s")
                         info['status'] = 'timeout'
-            self.active_threads = len([t for t in self._thread_registry.values()
-                                       if t['status'] == 'active'])
+            self.active_threads = len([t for t in self._thread_registry.values() if t['status'] == 'active'])
 
     @property
     def has_active_threads(self):
@@ -1294,7 +1136,6 @@ class AppState(QObject):
 # --------------------------
 class AudioRecorder:
     """Audio recorder with improved resource management using singleton pattern."""
-
     _pyaudio_instance = None
     _instance_lock = threading.Lock()
 
@@ -1325,10 +1166,7 @@ class AudioRecorder:
 
             device_count = self.audio.get_device_count()
             if device_count == 0:
-                raise ResourceError(
-                    "No audio devices found",
-                    details={'device_count': 0}
-                )
+                raise ResourceError("No audio devices found", details={'device_count': 0})
 
             self.stream = self.audio.open(
                 format=AudioConfig.FORMAT,
@@ -1353,9 +1191,7 @@ class AudioRecorder:
         """Safely cleanup audio resources."""
         if self._cleanup_done:
             return
-
         self._cleanup_done = True
-
         try:
             if self.stream:
                 if self.stream.is_active():
@@ -1365,8 +1201,7 @@ class AudioRecorder:
                 logger.info("Audio stream closed")
         except Exception as e:
             logger.error(f"Error closing stream: {e}")
-
-        self.audio = None
+        self.audio = None  # keep singleton instance alive at class level
 
     def record(self):
         """Record audio with improved error handling."""
@@ -1379,8 +1214,7 @@ class AudioRecorder:
         try:
             while self.state.is_recording:
                 try:
-                    data = self.stream.read(AudioConfig.CHUNK_SIZE,
-                                            exception_on_overflow=False)
+                    data = self.stream.read(AudioConfig.CHUNK_SIZE, exception_on_overflow=False)
                     recorded_data.append(data)
                 except Exception as e:
                     logger.error(f"Error reading audio chunk: {e}")
@@ -1431,7 +1265,6 @@ class TranscriptionThread(QThread):
     def run(self) -> None:
         """Enhanced processing with reliable state tracking and cancellation support."""
         self.state.register_thread(self._thread_id)
-
         try:
             if not self.audio_data:
                 self.error_occurred.emit("No audio data to transcribe.")
@@ -1450,13 +1283,13 @@ class TranscriptionThread(QThread):
                     # May be NaN when not computable; UI handles it as "N/A"
                     self.confidence_updated.emit(float(confidence_info['avg_confidence']))
 
-                if "Failed to transcribe" not in transcription and "Transcription resulted in no text" not in transcription:
+                if ("Failed to transcribe" not in transcription and
+                        "Transcription resulted in no text" not in transcription):
                     refined = self.refine_text(transcription, confidence_info)
                     if not self.is_cancelled():
                         self.refinement_finished.emit(refined)
                 else:
                     self.refinement_finished.emit("")
-
         except Exception as e:
             logger.exception(f"Error in TranscriptionThread {self._thread_id}")
             self.error_occurred.emit(str(e))
@@ -1473,7 +1306,6 @@ class TranscriptionThread(QThread):
 
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as temp_wav:
                 audio_int16 = (processed_audio * 32767).astype(np.int16)
-
                 with wave.open(temp_wav.name, 'wb') as wf:
                     wf.setnchannels(AudioConfig.CHANNELS)
                     wf.setsampwidth(2)
@@ -1497,7 +1329,6 @@ class TranscriptionThread(QThread):
                         return "Transcription cancelled.", {}
 
                     detected_language = self._detect_language_fast(temp_wav.name)
-
                     mlx_params = self._get_mlx_params_for_quality(audio_analysis)
 
                     result = mlx_whisper.transcribe(
@@ -1513,7 +1344,6 @@ class TranscriptionThread(QThread):
                         'low_confidence_words': self._get_low_confidence_words(result.get('segments', [])),
                         'audio_quality': audio_analysis.quality.value
                     }
-
                     return result['text'].strip(), confidence_info
                 else:
                     return self._transcribe_chunks_enhanced(temp_wav.name, chunks, processed_audio, audio_analysis)
@@ -1523,8 +1353,7 @@ class TranscriptionThread(QThread):
             return f"Failed to transcribe: {str(e)}", {}
 
     def _transcribe_chunks_enhanced(self, wav_path: str, chunks: List[Tuple[float, float]],
-                                    audio_data: np.ndarray, audio_analysis: AudioAnalysis) -> Tuple[
-        str, Dict[str, Any]]:
+                                    audio_data: np.ndarray, audio_analysis: AudioAnalysis) -> Tuple[str, Dict[str, Any]]:
         """Transcribe audio chunks with overlap, confidence tracking, and cancellation support."""
         try:
             full_transcription = []
@@ -1553,7 +1382,6 @@ class TranscriptionThread(QThread):
 
                 with tempfile.NamedTemporaryFile(suffix=f'_chunk_{i}.wav', delete=True) as chunk_file:
                     chunk_int16 = (chunk_audio * 32767).astype(np.int16)
-
                     with wave.open(chunk_file.name, 'wb') as wf:
                         wf.setnchannels(AudioConfig.CHANNELS)
                         wf.setsampwidth(2)
@@ -1586,7 +1414,6 @@ class TranscriptionThread(QThread):
                         )
 
                         chunk_text = result['text'].strip()
-
                         if i > 0 and overlap_duration > 0:
                             chunk_text = self._remove_overlap_text(chunk_text, previous_text)
 
@@ -1602,28 +1429,25 @@ class TranscriptionThread(QThread):
 
                         low_confidence_words.extend(self._get_low_confidence_words(segments))
 
-                        logger.info(
-                            f"Chunk {i + 1} transcribed with {chunk_confidence if not math.isnan(chunk_confidence) else 'N/A'} confidence")
+                        logger.info(f"Chunk {i + 1} transcribed with {chunk_confidence if not math.isnan(chunk_confidence) else 'N/A'} confidence")
 
                     except Exception as e:
                         logger.error(f"Failed to transcribe chunk {i + 1}: {e}")
                         full_transcription.append(f"[Error in chunk {i + 1}]")
                         all_confidences.append(float('nan'))
 
-            # Combine results
             valid_confidences = [c for c in all_confidences if not math.isnan(c)]
             avg_confidence = (np.mean(valid_confidences) if valid_confidences else float('nan'))
 
             confidence_info = {
-                'avg_confidence': avg_confidence,
+                'avg_confidence': float(avg_confidence),
                 'low_confidence_words': low_confidence_words,
                 'audio_quality': audio_analysis.quality.value,
                 'language': detected_language
             }
 
             final_text = " ".join(full_transcription).strip()
-            logger.info(
-                f"Final transcription completed with {avg_confidence if not math.isnan(avg_confidence) else 'N/A'} average confidence")
+            logger.info(f"Final transcription completed with {avg_confidence if not math.isnan(avg_confidence) else 'N/A'} average confidence")
             return final_text, confidence_info
 
         except Exception as e:
@@ -1633,7 +1457,6 @@ class TranscriptionThread(QThread):
     def _get_enhanced_prompt(self, audio_analysis: AudioAnalysis) -> str:
         """Generate context-aware prompt based on audio quality."""
         base_prompt = "Accurate transcript with proper punctuation and capitalization."
-
         if audio_analysis.quality == AudioQuality.POOR:
             return f"{base_prompt} Audio quality is poor with possible noise or distortion."
         elif audio_analysis.quality == AudioQuality.FAIR:
@@ -1646,7 +1469,7 @@ class TranscriptionThread(QThread):
     def _get_mlx_params_for_quality(self, audio_analysis: AudioAnalysis) -> Dict[str, Any]:
         """Get MLX Whisper parameters optimized for audio quality."""
         base_params = {
-            # FIX-STEP1: disable word-level timestamps to prevent memory pressure across calls
+            # FIX to prevent memory-pressure issues:
             'word_timestamps': False,
             'condition_on_previous_text': True,
             'prepend_punctuations': '"\'-([{-',
@@ -1655,37 +1478,29 @@ class TranscriptionThread(QThread):
         }
 
         if audio_analysis.quality == AudioQuality.POOR:
-            return {
-                **base_params,
-                'temperature': (0.0, 0.2, 0.4, 0.6, 0.8),
-                'compression_ratio_threshold': 3.0,
-                'logprob_threshold': -1.5,
-                'no_speech_threshold': 0.4,
-            }
+            return {**base_params,
+                    'temperature': (0.0, 0.2, 0.4, 0.6, 0.8),
+                    'compression_ratio_threshold': 3.0,
+                    'logprob_threshold': -1.5,
+                    'no_speech_threshold': 0.4}
         elif audio_analysis.quality == AudioQuality.FAIR:
-            return {
-                **base_params,
-                'temperature': (0.0, 0.2, 0.4, 0.6),
-                'compression_ratio_threshold': 2.8,
-                'logprob_threshold': -1.2,
-                'no_speech_threshold': 0.5,
-            }
+            return {**base_params,
+                    'temperature': (0.0, 0.2, 0.4, 0.6),
+                    'compression_ratio_threshold': 2.8,
+                    'logprob_threshold': -1.2,
+                    'no_speech_threshold': 0.5}
         elif audio_analysis.quality == AudioQuality.GOOD:
-            return {
-                **base_params,
-                'temperature': (0.0, 0.2, 0.4),
-                'compression_ratio_threshold': 2.4,
-                'logprob_threshold': -1.0,
-                'no_speech_threshold': 0.6,
-            }
+            return {**base_params,
+                    'temperature': (0.0, 0.2, 0.4),
+                    'compression_ratio_threshold': 2.4,
+                    'logprob_threshold': -1.0,
+                    'no_speech_threshold': 0.6}
         else:  # EXCELLENT
-            return {
-                **base_params,
-                'temperature': 0.0,
-                'compression_ratio_threshold': 2.0,
-                'logprob_threshold': -0.5,
-                'no_speech_threshold': 0.7,
-            }
+            return {**base_params,
+                    'temperature': 0.0,
+                    'compression_ratio_threshold': 2.0,
+                    'logprob_threshold': -0.5,
+                    'no_speech_threshold': 0.7}
 
     def _detect_language_fast(self, audio_chunk_path: str) -> str:
         """Fast language detection using a smaller model."""
@@ -1705,17 +1520,16 @@ class TranscriptionThread(QThread):
     def _calculate_avg_confidence(self, segments: List[Dict]) -> float:
         """Return confidence in [0,1] when possible; NaN when not computable.
 
-        Primary (old path): average of word-level 'probability' if present.
+        Primary (legacy): average of word-level 'probability' if present.
         Fallback: map segment-level 'avg_logprob' (≈ [-5, 0]) to [0,1] via logistic.
         """
         if not segments:
             return float('nan')
 
-        # Path 1: word-level probabilities (present only if word_timestamps were produced)
+        # Word-level probabilities (present only if word_timestamps were produced)
         confidences = []
         for segment in segments:
-            words = segment.get('words', [])
-            for word in words:
+            for word in segment.get('words', []):
                 prob = word.get('probability')
                 if prob is not None:
                     confidences.append(prob)
@@ -1723,26 +1537,23 @@ class TranscriptionThread(QThread):
         if confidences:
             return float(np.mean(confidences))
 
-        # Path 2 (fallback): segment avg_logprob -> [0..1] proxy via logistic mapping
-        # Typical avg_logprob for Whisper lies roughly in [-5, 0]; shift and scale.
+        # Fallback: segment-level avg_logprob -> [0..1]
         proxies = []
         for segment in segments:
             lp = segment.get('avg_logprob')
             if lp is not None:
-                proxies.append(1.0 / (1.0 + np.exp(-2.0 * (lp + 1.0))))  # tunable
+                proxies.append(1.0 / (1.0 + np.exp(-2.0 * (lp + 1.0))))  # tunable mapping
 
         if proxies:
             return float(np.mean(proxies))
 
-        # Not computable -> NaN (UI will display "N/A")
         return float('nan')
 
     def _get_low_confidence_words(self, segments: List[Dict], threshold: float = 0.5) -> List[str]:
         """Extract low-confidence words when available (word timestamps path)."""
         low_conf_words = []
         for segment in segments:
-            words = segment.get('words', [])
-            for word in words:
+            for word in segment.get('words', []):
                 if 'probability' in word and word['probability'] < threshold:
                     low_conf_words.append(word.get('word', '').strip())
         return low_conf_words
@@ -1751,16 +1562,12 @@ class TranscriptionThread(QThread):
         """Remove overlapping text between chunks."""
         if not previous_text:
             return current_text
-
         current_words = current_text.split()
         previous_words = previous_text.split()
-
         max_overlap = min(VAD_MAX_OVERLAP_WORDS, len(current_words), len(previous_words))
-
         for overlap_len in range(max_overlap, 0, -1):
             if current_words[:overlap_len] == previous_words[-overlap_len:]:
                 return " ".join(current_words[overlap_len:])
-
         return current_text
 
     def refine_text(self, text: str, confidence_info: Dict[str, Any] = None) -> str:
@@ -1787,11 +1594,7 @@ class TranscriptionThread(QThread):
             response = ollama.chat(
                 model=self.model_name,
                 messages=messages,
-                options={
-                    'ctx_num': config.ctx_num,
-                    'temperature': config.temperature,
-                    'seed': config.seed
-                }
+                options={'ctx_num': config.ctx_num, 'temperature': config.temperature, 'seed': config.seed}
             )
 
             refined = re.sub(r'<think>.*?</think>', '', response['message']['content'], flags=re.DOTALL)
@@ -1823,20 +1626,16 @@ class RefinementThread(QThread):
         self._cancel_lock = threading.Lock()
 
     def cancel(self):
-        """Request cancellation of this thread."""
         with self._cancel_lock:
             self._is_cancelled = True
             logger.info(f"Cancellation requested for refinement thread {self._thread_id}")
 
     def is_cancelled(self):
-        """Check if cancellation was requested."""
         with self._cancel_lock:
             return self._is_cancelled
 
     def run(self) -> None:
-        """Single-step refinement process with tracking."""
         self.state.register_thread(self._thread_id)
-
         try:
             if self.is_cancelled():
                 logger.info(f"Refinement thread {self._thread_id} cancelled before processing")
@@ -1860,7 +1659,6 @@ class RefinementThread(QThread):
             self.state.unregister_thread(self._thread_id)
 
     def refine_text(self, text: str, confidence_info: Dict[str, Any] = None) -> str:
-        """Single-step text refinement with optional audio quality context."""
         try:
             if self.is_cancelled():
                 return "Refinement cancelled."
@@ -1883,11 +1681,7 @@ class RefinementThread(QThread):
             response = ollama.chat(
                 model=self.model_name,
                 messages=messages,
-                options={
-                    'ctx_num': config.ctx_num,
-                    'temperature': config.temperature,
-                    'seed': config.seed
-                }
+                options={'ctx_num': config.ctx_num, 'temperature': config.temperature, 'seed': config.seed}
             )
 
             refined = re.sub(r'<think>.*?</think>', '', response['message']['content'], flags=re.DOTALL)
@@ -1906,7 +1700,6 @@ class RefinementThread(QThread):
 # --------------------------
 class AudioTranscriberApp(QWidget):
     """Enhanced GUI application maintaining original layout and functionality with safe thread management."""
-
     _transcription_ready = pyqtSignal(bytes)
     _recording_failed = pyqtSignal()
 
@@ -1924,17 +1717,14 @@ class AudioTranscriberApp(QWidget):
         self.init_ui()
 
     def _handle_transcription_ready(self, audio_data: bytes):
-        """Handle transcription ready signal (runs on main thread)."""
         self.current_transcription = ""
         self.start_transcription(audio_data)
 
     def _handle_recording_failed(self):
-        """Handle recording failed signal (runs on main thread)."""
         self.display_transcription("No audio data captured.")
         self.display_refined_text("")
 
     def _disconnect_worker_signals(self):
-        """Safely disconnect all worker signals."""
         for connection in self._worker_connections:
             try:
                 connection[0].disconnect(connection[1])
@@ -1944,23 +1734,19 @@ class AudioTranscriberApp(QWidget):
         self._worker_connections.clear()
 
     def _connect_worker_signals(self, worker):
-        """Connect worker signals and track connections."""
         self._disconnect_worker_signals()
-
         connections = [
             (worker.transcription_finished, self.display_transcription),
             (worker.refinement_finished, self.display_refined_text),
             (worker.confidence_updated, self.update_confidence_display),
             (worker.error_occurred, self.handle_error)
         ]
-
         for signal, slot in connections:
             signal.connect(slot)
             self._worker_connections.append((signal, slot))
             logger.debug(f"Connected signal: {signal}")
 
     def fetch_models(self) -> List[str]:
-        """Fetch available models with same logic as original."""
         try:
             models = ollama.list()['models']
             installed_models = [m['name'] for m in models]
@@ -1968,12 +1754,11 @@ class AudioTranscriberApp(QWidget):
                 installed_models.remove('phi4:latest')
                 installed_models.insert(0, 'phi4:latest')
             return installed_models if installed_models else ['phi4:latest', 'deepseek-r1:1.5b']
-        except Exception as e:
+        except Exception:
             logger.error("Failed to fetch models", exc_info=True)
             return ['phi4:latest', 'deepseek-r1:1.5b']
 
     def init_ui(self) -> None:
-        """Initialize UI with same layout as original plus confidence display."""
         self.setWindowTitle("Enhanced Hybrid Audio Transcriber - COMPLETE FIXED")
         self.setGeometry(420, 300, 800, 500)
         main_layout = QVBoxLayout(self)
@@ -1983,7 +1768,6 @@ class AudioTranscriberApp(QWidget):
         self.show()
 
     def create_top_controls(self, layout) -> None:
-        """Create top controls with same styling as original."""
         top_layout = QHBoxLayout()
 
         self.recording_button = QPushButton("Start Recording", self)
@@ -2025,12 +1809,12 @@ class AudioTranscriberApp(QWidget):
         else:
             self.model_selector.setCurrentIndex(0)
         self.model_selector.setStyleSheet("""
-            QComboBox { 
-                padding: 8px; 
-                min-width: 120px; 
-                font-size: 14px; 
-                border: 1px solid #cccccc; 
-                border-radius: 4px; 
+            QComboBox {
+                padding: 8px;
+                min-width: 120px;
+                font-size: 14px;
+                border: 1px solid #cccccc;
+                border-radius: 4px;
             }
             QComboBox::drop-down { width: 20px; }
         """)
@@ -2052,13 +1836,11 @@ class AudioTranscriberApp(QWidget):
         layout.addLayout(top_layout)
 
     def create_progress_bar(self, layout) -> None:
-        """Create progress bar (same as original)."""
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setValue(0)
         layout.addWidget(self.progress_bar)
 
     def create_text_areas(self, layout) -> None:
-        """Create text areas with aligned confidence indicators."""
         text_layout = QHBoxLayout()
 
         trans_layout = QVBoxLayout()
@@ -2126,7 +1908,6 @@ class AudioTranscriberApp(QWidget):
         layout.addLayout(text_layout)
 
     def set_button_style(self, state):
-        """Set button style (same as original)."""
         styles = {
             "ready": ("Start Recording", "#1E5631", "#2E8B57"),
             "recording": ("Stop Recording", "#8B0000", "#A52A2A"),
@@ -2149,11 +1930,9 @@ class AudioTranscriberApp(QWidget):
         """)
 
     def toggle_recording(self):
-        """Toggle recording with safety checks."""
         if self.state.has_active_threads:
             logger.warning("Cannot start recording: processing still in progress")
-            QMessageBox.information(self, "Processing",
-                                    "Please wait for the current task to complete.")
+            QMessageBox.information(self, "Processing", "Please wait for the current task to complete.")
             return
 
         if not self.state.is_recording:
@@ -2162,7 +1941,6 @@ class AudioTranscriberApp(QWidget):
             self.stop_recording()
 
     def start_recording(self):
-        """Start recording with confidence display reset."""
         self.set_button_style("recording")
         self.progress_bar.setValue(0)
         self.state.is_recording = True
@@ -2197,7 +1975,6 @@ class AudioTranscriberApp(QWidget):
         threading.Thread(target=self.record_audio_background, daemon=True).start()
 
     def record_audio_background(self):
-        """Background recording with proper signal usage."""
         try:
             with AudioRecorder(self.state) as recorder:
                 audio_data = recorder.record()
@@ -2213,21 +1990,17 @@ class AudioTranscriberApp(QWidget):
             self._recording_failed.emit()
 
     def stop_recording(self):
-        """Stop recording."""
         self.state.is_recording = False
         self.set_button_style("processing")
 
     def start_transcription(self, audio_data):
-        """Start transcription with safe thread management - no terminate()."""
         if self.state.has_active_threads:
             logger.warning("Cannot start transcription: previous task still in progress")
-            QMessageBox.information(self, "Processing",
-                                    "Previous audio is still being processed. Please wait.")
+            QMessageBox.information(self, "Processing", "Previous audio is still being processed. Please wait.")
             return
 
         if self.current_worker:
             self._disconnect_worker_signals()
-
             if self.current_worker.isRunning():
                 if hasattr(self.current_worker, 'cancel'):
                     self.current_worker.cancel()
@@ -2255,42 +2028,29 @@ class AudioTranscriberApp(QWidget):
             self.current_worker.deleteLater()
             self.current_worker = None
 
-        self.current_worker = TranscriptionThread(
-            audio_data,
-            self.model_selector.currentText(),
-            self.state
-        )
-
+        self.current_worker = TranscriptionThread(audio_data, self.model_selector.currentText(), self.state)
         self._connect_worker_signals(self.current_worker)
-
         self.current_worker.start()
         logger.info("Started new transcription worker")
 
     def re_refine_text(self):
-        """Re-refine with safe thread management - no terminate()."""
         text = self.transcription_box.toPlainText().strip()
         if not text:
             return
 
         if self.state.has_active_threads:
             logger.warning("Cannot start re-refinement: processing still in progress")
-            QMessageBox.information(self, "Processing",
-                                    "Please wait for the current task to complete.")
+            QMessageBox.information(self, "Processing", "Please wait for the current task to complete.")
             return
 
         if self.current_worker and self.current_worker.isRunning():
             logger.info("Waiting for previous worker...")
-
             if hasattr(self.current_worker, 'cancel'):
                 self.current_worker.cancel()
-
             self.current_worker.wait(5000)
-
             if self.current_worker.isRunning():
-                QMessageBox.warning(self, "Processing",
-                                    "Previous task still running. Please try again.")
+                QMessageBox.warning(self, "Processing", "Previous task still running. Please try again.")
                 return
-
             self._disconnect_worker_signals()
 
         self.set_button_style("processing")
@@ -2305,7 +2065,6 @@ class AudioTranscriberApp(QWidget):
         self.current_worker.start()
 
     def display_transcription(self, text):
-        """Display transcription with confidence update."""
         self.transcription_box.setText(text)
         self.current_transcription = text
         self.progress_bar.setValue(50)
@@ -2315,19 +2074,16 @@ class AudioTranscriberApp(QWidget):
             self.update_quality_display(audio_analysis.quality)
 
     def display_refined_text(self, text):
-        """Display refined text."""
         self.refined_box.setText(text)
         self.progress_bar.setValue(100)
         self.set_button_style("ready")
 
     def copy_text(self, widget):
-        """Copy text."""
         clipboard = QApplication.clipboard()
         clipboard.setText(widget.toPlainText())
 
     def update_confidence_display(self, confidence: float):
         """Update the confidence display with color coding and 'N/A' fallback."""
-        # Handle NaN or sentinel values gracefully
         if confidence is None or math.isnan(confidence) or confidence < 0:
             self.confidence_label.setText("N/A")
             self.confidence_label.setToolTip("Confidence not calculated (word timestamps disabled).")
@@ -2368,7 +2124,6 @@ class AudioTranscriberApp(QWidget):
         """)
 
     def update_quality_display(self, quality: AudioQuality):
-        """Update the audio quality display with color coding."""
         quality_text = quality.value.capitalize()
         self.quality_label.setText(quality_text)
 
@@ -2378,7 +2133,6 @@ class AudioTranscriberApp(QWidget):
             AudioQuality.FAIR: "#f39c12",
             AudioQuality.POOR: "#e74c3c"
         }
-
         color = quality_colors.get(quality, "#95a5a6")
 
         self.quality_label.setStyleSheet(f"""
@@ -2394,14 +2148,13 @@ class AudioTranscriberApp(QWidget):
         """)
 
     def handle_error(self, error_message):
-        """Handle errors."""
         logger.error(error_message)
         QMessageBox.critical(self, "Error", error_message)
         self.set_button_style("ready")
         self.progress_bar.setValue(0)
 
     def on_sensitivity_changed(self, text):
-        """SENSITIVITY: Handle sensitivity level changes."""
+        """Handle sensitivity level changes with updated descriptions."""
         level_map = {
             "Original": SensitivityLevel.ORIGINAL,
             "Balanced": SensitivityLevel.BALANCED,
@@ -2409,37 +2162,39 @@ class AudioTranscriberApp(QWidget):
         }
 
         new_level = level_map.get(text, SensitivityLevel.BALANCED)
-        GLOBAL_AUDIO_CONFIG.current_level = new_level
+        GLOBAL_AUDIO_CONFIG.current_level = new_level  # triggers VAD rebuild via AppState callback
 
-        config = GLOBAL_AUDIO_CONFIG.config
+        # Updated descriptions to reflect new semantics
         info_text = f"Sensitivity: {text}\n\n"
-
         if new_level == SensitivityLevel.SENSITIVE:
-            info_text += "• Maximum amplification enabled (4x)\n"
-            info_text += "• Aggressive noise reduction active\n"
-            info_text += "• Very lenient quality thresholds\n"
-            info_text += "• Optimized for quiet speakers"
+            info_text += (
+                "• Ultra‑sensitive detection for very quiet speakers\n"
+                "• Maximum permissiveness (VAD aggressiveness = 0)\n"
+                "• Lowest silence threshold; stronger low‑voice boosts\n"
+                "• Extra‑gentle noise floor handling\n"
+            )
         elif new_level == SensitivityLevel.BALANCED:
-            info_text += "• Balanced amplification (2.5x)\n"
-            info_text += "• Moderate noise reduction\n"
-            info_text += "• Improved quality thresholds\n"
-            info_text += "• Good for most users"
+            info_text += (
+                "• Optimized for quiet/soft voices (previous 'Sensitive')\n"
+                "• Lower silence threshold and stronger low‑voice boosts\n"
+                "• Slightly more aggressive VAD (level 1)\n"
+                "• Moderate noise reduction\n"
+            )
         else:
-            info_text += "• Conservative settings\n"
-            info_text += "• Minimal processing\n"
-            info_text += "• Original thresholds\n"
-            info_text += "• Best for clear recordings"
+            info_text += (
+                "• Conservative processing (original)\n"
+                "• Minimal noise reduction\n"
+                "• Standard thresholds\n"
+                "• Best for already clear recordings\n"
+            )
 
         QMessageBox.information(self, "Sensitivity Changed", info_text)
 
     def closeEvent(self, event):
-        """Handle close event with proper cleanup."""
         if self.state.has_active_threads:
             logger.info("Waiting for active threads to finish...")
-
             if self.current_worker and hasattr(self.current_worker, 'cancel'):
                 self.current_worker.cancel()
-
             wait_time = 0
             while self.state.has_active_threads and wait_time < 3000:
                 QApplication.processEvents()
@@ -2449,7 +2204,7 @@ class AudioTranscriberApp(QWidget):
             try:
                 AudioRecorder._pyaudio_instance.terminate()
                 logger.info("PyAudio singleton terminated")
-            except:
+            except Exception:
                 pass
 
         event.accept()
