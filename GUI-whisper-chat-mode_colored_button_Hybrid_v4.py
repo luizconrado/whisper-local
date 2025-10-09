@@ -1333,7 +1333,9 @@ class TranscriptionThread(QThread):
 
                     result = mlx_whisper.transcribe(
                         temp_wav.name,
+                        # path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
                         path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
+                        # path_or_hf_repo="mlx-community/whisper-tiny",
                         initial_prompt=self._get_enhanced_prompt(audio_analysis),
                         language=detected_language,
                         **mlx_params
