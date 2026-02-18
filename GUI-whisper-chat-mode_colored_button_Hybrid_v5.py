@@ -1478,12 +1478,24 @@ class TranscriptionThread(QThread):
     confidence_updated = pyqtSignal(float)  # Signal for confidence updates
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, audio_data: bytes, model_name: str, state: AppState, forced_language: Optional[str] = None):
+    def __init__(
+        self,
+        audio_data: bytes,
+        model_name: str,
+        state: AppState,
+        forced_language: Optional[str] = None,
+        post_process_mode: str = "refine",
+    ):
         super().__init__()
         self.audio_data = audio_data
         self.model_name = model_name
         self.state = state
         self.forced_language = forced_language
+        normalized_mode = (post_process_mode or "refine").strip().lower()
+        if normalized_mode not in ("refine", "promptify"):
+            logger.warning(f"Unknown post-process mode '{post_process_mode}', defaulting to 'refine'")
+            normalized_mode = "refine"
+        self.post_process_mode = normalized_mode
         self._thread_id = f"transcribe_{id(self)}_{datetime.datetime.now().timestamp()}"
         self._is_cancelled = False
         self._cancel_lock = threading.Lock()
@@ -1522,7 +1534,11 @@ class TranscriptionThread(QThread):
 
                 if ("Failed to transcribe" not in transcription and
                         "Transcription resulted in no text" not in transcription):
-                    refined = self.refine_text(transcription, confidence_info)
+                    logger.info(f"Running post-process mode: {self.post_process_mode}")
+                    if self.post_process_mode == "promptify":
+                        refined = self.promptify_text(transcription)
+                    else:
+                        refined = self.refine_text(transcription, confidence_info)
                     if not self.is_cancelled():
                         self.refinement_finished.emit(refined)
                 else:
@@ -1841,6 +1857,46 @@ class TranscriptionThread(QThread):
         except Exception as e:
             logger.error(f"Text refinement failed: {e}")
             return f"Refinement failed: {str(e)}"
+
+    def promptify_text(self, text: str) -> str:
+        """Generate a promptified output from transcribed text."""
+        try:
+            if self.is_cancelled():
+                return "Promptify cancelled."
+
+            model_config = ModelConfig.get_config(self.model_name)
+            promptify_config = PromptifyConfig.get_default_config()
+            effective_ctx = max(4096, int(model_config.ctx_num))
+
+            messages = [
+                {'role': 'system', 'content': promptify_config.system_message},
+                {'role': 'user', 'content': promptify_config.user_message.format(text=text)}
+            ]
+
+            chat_kwargs = {
+                'model': self.model_name,
+                'messages': messages,
+                'options': {'num_ctx': effective_ctx, 'temperature': promptify_config.temperature, 'seed': promptify_config.seed}
+            }
+            if model_config.think is not None:
+                chat_kwargs['think'] = model_config.think
+
+            response = ollama.chat(**chat_kwargs)
+            raw_content = response.message.content or ''
+            if model_config.think is None:
+                raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
+
+            result = raw_content.strip()
+            # Normalize markdown code fences when models wrap the generated prompt in ``` blocks.
+            fenced = re.match(r'^```(?:[a-zA-Z0-9_-]+)?\s*(.*?)\s*```$', result, flags=re.DOTALL)
+            if fenced:
+                result = fenced.group(1).strip()
+
+            logger.info("Completed Promptify generation from transcription flow")
+            return result
+        except Exception as e:
+            logger.error(f"Promptify failed during transcription flow: {e}")
+            return f"Promptify failed: {str(e)}"
 
 
 # --------------------------
@@ -2496,11 +2552,12 @@ class AudioTranscriberApp(QWidget):
             audio_data,
             self.model_selector.currentText(),
             self.state,
-            forced_language=forced_language
+            forced_language=forced_language,
+            post_process_mode=self.current_text_action
         )
         self._connect_worker_signals(self.current_worker)
         self.current_worker.start()
-        logger.info("Started new transcription worker")
+        logger.info(f"Started new transcription worker (post-process: {self.current_text_action})")
 
     def re_refine_text(self):
         text = self.transcription_box.toPlainText().strip()
