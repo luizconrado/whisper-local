@@ -77,7 +77,7 @@ import pyaudio
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QProgressBar, QComboBox, QMessageBox, QLabel,
-    QProgressDialog
+    QProgressDialog, QToolButton, QMenu, QAction, QSizePolicy
 )
 from PyQt5.QtCore import pyqtSignal, QThread, QObject, Qt
 
@@ -581,12 +581,19 @@ class GlobalAudioConfig:
 
     @current_level.setter
     def current_level(self, level: SensitivityLevel):
+        callbacks_snapshot = []
+        config_snapshot = None
+        old_level = None
         with self._lock:
-            if level != self._current_level:
-                old_level = self._current_level
-                self._current_level = level
-                logger.info(f"Sensitivity changed from {old_level.value} to {level.value}")
-                self._notify_callbacks()
+            if level == self._current_level:
+                return
+            old_level = self._current_level
+            self._current_level = level
+            config_snapshot = self._configs[self._current_level]
+            callbacks_snapshot = list(self._callbacks)
+
+        logger.info(f"Sensitivity changed from {old_level.value} to {level.value}")
+        self._notify_callbacks(self._current_level, config_snapshot, callbacks_snapshot)
 
     @property
     def config(self) -> SensitivityConfig:
@@ -597,10 +604,10 @@ class GlobalAudioConfig:
         with self._lock:
             self._callbacks.append(callback)
 
-    def _notify_callbacks(self):
-        for callback in self._callbacks:
+    def _notify_callbacks(self, level: SensitivityLevel, config: SensitivityConfig, callbacks):
+        for callback in callbacks:
             try:
-                callback(self._current_level, self.config)
+                callback(level, config)
             except Exception as e:
                 logger.error(f"Error in config callback: {e}")
 
@@ -803,6 +810,59 @@ class ModelConfig:
         else:
             logger.info(f"Model '{model_name}' not found. Using phi4:latest as default.")
             return configs['phi4:latest']
+
+
+@dataclass
+class PromptifyConfig:
+    """Configuration for prompt generation from transcribed text."""
+    temperature: float
+    seed: int
+    system_message: str
+    user_message: str
+
+    @classmethod
+    def get_default_config(cls):
+        return cls(
+            temperature=0.25,
+            seed=11,
+            system_message=(
+                "You are Promptify, a senior prompt engineer.\n"
+                "Your job is to convert raw user text into one execution-ready prompt for another LLM.\n\n"
+                "Output contract:\n"
+                "1. Return exactly one final prompt.\n"
+                "2. Do not include analysis, explanations, or preamble.\n"
+                "3. The prompt must be structured with these sections in this exact order:\n"
+                "   ROLE\n"
+                "   PURPOSE\n"
+                "   CONTEXT\n"
+                "   INPUTS\n"
+                "   CONSTRAINTS\n"
+                "   STEP-BY-STEP INSTRUCTIONS\n"
+                "   OUTPUT FORMAT\n"
+                "   QUALITY GATES\n"
+                "   DONE CRITERIA\n"
+                "   ASSUMPTIONS (only if needed)\n\n"
+                "Construction rules:\n"
+                "- First normalize noisy text (spelling, grammar, ambiguity) silently.\n"
+                "- Infer user intent and required outcome.\n"
+                "- Use unambiguous imperative instructions.\n"
+                "- Use MUST/SHOULD wording for constraints.\n"
+                "- Keep it concise but complete.\n"
+                "- If critical info is missing, add minimal assumptions clearly.\n\n"
+                "QUALITY GATES requirements:\n"
+                "- Include pass/fail checks for completeness, constraint compliance, format compliance, and factual-grounding behavior.\n"
+                "- Include a final self-check instruction that the downstream LLM must execute before final output."
+            ),
+            user_message=(
+                "Transform the source text below into an execution-ready prompt.\n\n"
+                "Source text:\n"
+                "{text}\n\n"
+                "Priorities:\n"
+                "1. Maximize clarity and correctness.\n"
+                "2. Minimize ambiguity.\n"
+                "3. Produce a practical prompt that can be used immediately."
+            )
+        )
 
 
 # --------------------------
@@ -1871,6 +1931,88 @@ class RefinementThread(QThread):
 
 
 # --------------------------
+# Promptify Thread
+# --------------------------
+class PromptifyThread(QThread):
+    """Generate a high-quality prompt from existing text using the selected model."""
+    promptify_finished = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, text: str, model_name: str, state: AppState):
+        super().__init__()
+        self.text = text
+        self.model_name = model_name
+        self.state = state
+        self._thread_id = f"promptify_{id(self)}_{datetime.datetime.now().timestamp()}"
+        self._is_cancelled = False
+        self._cancel_lock = threading.Lock()
+
+    def cancel(self):
+        with self._cancel_lock:
+            self._is_cancelled = True
+            logger.info(f"Cancellation requested for promptify thread {self._thread_id}")
+
+    def is_cancelled(self):
+        with self._cancel_lock:
+            return self._is_cancelled
+
+    def run(self) -> None:
+        self.state.register_thread(self._thread_id)
+        try:
+            if self.is_cancelled():
+                logger.info(f"Promptify thread {self._thread_id} cancelled before processing")
+                return
+
+            result = self.promptify_text(self.text)
+            if not self.is_cancelled():
+                self.promptify_finished.emit(result)
+        except Exception as e:
+            logger.error(f"Error in PromptifyThread {self._thread_id}", exc_info=True)
+            self.error_occurred.emit(str(e))
+        finally:
+            self.state.unregister_thread(self._thread_id)
+
+    def promptify_text(self, text: str) -> str:
+        try:
+            if self.is_cancelled():
+                return "Promptify cancelled."
+
+            model_config = ModelConfig.get_config(self.model_name)
+            promptify_config = PromptifyConfig.get_default_config()
+            effective_ctx = max(4096, int(model_config.ctx_num))
+
+            messages = [
+                {'role': 'system', 'content': promptify_config.system_message},
+                {'role': 'user', 'content': promptify_config.user_message.format(text=text)}
+            ]
+
+            chat_kwargs = {
+                'model': self.model_name,
+                'messages': messages,
+                'options': {'num_ctx': effective_ctx, 'temperature': promptify_config.temperature, 'seed': promptify_config.seed}
+            }
+            if model_config.think is not None:
+                chat_kwargs['think'] = model_config.think
+
+            response = ollama.chat(**chat_kwargs)
+            raw_content = response.message.content or ''
+            if model_config.think is None:
+                raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
+
+            result = raw_content.strip()
+            # Normalize markdown code fences when models wrap the generated prompt in ``` blocks.
+            fenced = re.match(r'^```(?:[a-zA-Z0-9_-]+)?\s*(.*?)\s*```$', result, flags=re.DOTALL)
+            if fenced:
+                result = fenced.group(1).strip()
+
+            logger.info("Completed Promptify generation")
+            return result
+        except Exception as e:
+            logger.error(f"Promptify failed: {e}")
+            return f"Promptify failed: {str(e)}"
+
+
+# --------------------------
 # FIX: Enhanced Main GUI Application with Safe Thread Management
 # --------------------------
 class AudioTranscriberApp(QWidget):
@@ -1882,6 +2024,7 @@ class AudioTranscriberApp(QWidget):
         super().__init__()
         self.state = AppState()
         self.available_models = self.fetch_models()
+        self.current_text_action = "refine"
         self.language_map = {
             "English": "en",
             "German": "de",
@@ -2042,18 +2185,67 @@ class AudioTranscriberApp(QWidget):
         """)
         top_layout.addWidget(self.model_selector, 30)
 
-        self.re_refine_button = QPushButton("Re-Refine Text", self)
-        self.re_refine_button.setStyleSheet("""
-            QPushButton {
+        self.text_action_button = QToolButton(self)
+        self.text_action_button.setText("Refine Text")
+        self.text_action_button.setToolTip("Active action: Refine Text")
+        self.text_action_button.setPopupMode(QToolButton.MenuButtonPopup)
+        self.text_action_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.text_action_button.setMinimumWidth(160)
+        self.text_action_button.setMinimumHeight(42)
+        self.text_action_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.text_action_button.setStyleSheet("""
+            QToolButton {
                 background-color: #2c3e50;
                 color: white;
-                padding: 8px;
+                /* Reserve right space for dropdown segment so text stays centered in main area */
+                padding: 7px 36px 7px 2px;
                 border-radius: 4px;
+                font-weight: bold;
+                font-size: 15px;
+                border: 1px solid #3d5f7c;
             }
-            QPushButton:hover { background-color: #34495e; }
+            QToolButton:hover { background-color: #34495e; }
+            QToolButton::menu-button {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 34px;
+                border-left: 1px solid #3d5f7c;
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+                background-color: #26425c;
+            }
+            QToolButton::menu-button:hover {
+                background-color: #2f5374;
+            }
+            QToolButton::menu-arrow {
+                width: 14px;
+                height: 14px;
+            }
         """)
-        self.re_refine_button.clicked.connect(self.re_refine_text)
-        top_layout.addWidget(self.re_refine_button, 20)
+        self.text_action_menu = QMenu(self.text_action_button)
+        self.text_action_menu.setStyleSheet("""
+            QMenu {
+                background-color: #233342;
+                color: white;
+                border: 1px solid #3d5f7c;
+                font-size: 14px;
+            }
+            QMenu::item {
+                padding: 8px 14px;
+            }
+            QMenu::item:selected {
+                background-color: #146b7d;
+            }
+        """)
+        self.refine_menu_action = QAction("Refine Text", self)
+        self.promptify_menu_action = QAction("Promptify", self)
+        self.refine_menu_action.triggered.connect(lambda: self.set_active_text_action("refine"))
+        self.promptify_menu_action.triggered.connect(lambda: self.set_active_text_action("promptify"))
+        self.text_action_menu.addAction(self.refine_menu_action)
+        self.text_action_menu.addAction(self.promptify_menu_action)
+        self.text_action_button.setMenu(self.text_action_menu)
+        self.text_action_button.clicked.connect(self.run_selected_text_action)
+        top_layout.addWidget(self.text_action_button, 20)
 
         layout.addLayout(top_layout)
 
@@ -2068,6 +2260,7 @@ class AudioTranscriberApp(QWidget):
         trans_layout = QVBoxLayout()
         self.transcription_box = QTextEdit(self)
         self.transcription_box.setPlaceholderText("Original transcription...")
+        self.transcription_box.setAcceptRichText(False)
         trans_layout.addWidget(self.transcription_box)
 
         trans_confidence_layout = QHBoxLayout()
@@ -2099,6 +2292,10 @@ class AudioTranscriberApp(QWidget):
         refined_layout = QVBoxLayout()
         self.refined_box = QTextEdit(self)
         self.refined_box.setPlaceholderText("Enhanced refined text...")
+        self.refined_box.setAcceptRichText(False)
+        # Keep both editors visually identical.
+        self.refined_box.setFont(self.transcription_box.font())
+        self.refined_box.document().setDefaultFont(self.transcription_box.font())
         refined_layout.addWidget(self.refined_box)
 
         quality_confidence_layout = QHBoxLayout()
@@ -2150,6 +2347,32 @@ class AudioTranscriberApp(QWidget):
                 background-color: {hover_color};
             }}
         """)
+        self._set_action_buttons_enabled(state == "ready")
+
+    def _set_action_buttons_enabled(self, enabled: bool):
+        if hasattr(self, 'text_action_button'):
+            self.text_action_button.setEnabled(enabled)
+
+    def set_active_text_action(self, action_name: str):
+        if action_name not in ("refine", "promptify"):
+            action_name = "refine"
+
+        self.current_text_action = action_name
+
+        if action_name == "promptify":
+            self.text_action_button.setText("Promptify")
+            self.text_action_button.setToolTip("Active action: Promptify")
+        else:
+            self.text_action_button.setText("Refine Text")
+            self.text_action_button.setToolTip("Active action: Refine Text")
+
+        logger.info(f"Text action changed to: {self.current_text_action}")
+
+    def run_selected_text_action(self):
+        if self.current_text_action == "promptify":
+            self.promptify_text()
+        else:
+            self.re_refine_text()
 
     def toggle_recording(self):
         if self.state.has_active_threads:
@@ -2293,8 +2516,45 @@ class AudioTranscriberApp(QWidget):
 
         self.current_worker.start()
 
+    def _get_promptify_source_text(self) -> str:
+        # Promptify always uses the original transcription (left box).
+        return self.transcription_box.toPlainText().strip() if hasattr(self, 'transcription_box') else ""
+
+    def promptify_text(self):
+        text = self._get_promptify_source_text()
+        if not text:
+            QMessageBox.information(self, "Promptify", "There is no text available to transform into a prompt.")
+            return
+
+        if self.state.has_active_threads:
+            logger.warning("Cannot start Promptify: processing still in progress")
+            QMessageBox.information(self, "Processing", "Please wait for the current task to complete.")
+            return
+
+        if self.current_worker and self.current_worker.isRunning():
+            logger.info("Waiting for previous worker before Promptify...")
+            if hasattr(self.current_worker, 'cancel'):
+                self.current_worker.cancel()
+            self.current_worker.wait(5000)
+            if self.current_worker.isRunning():
+                QMessageBox.warning(self, "Processing", "Previous task still running. Please try again.")
+                return
+            self._disconnect_worker_signals()
+
+        self.set_button_style("processing")
+        self.progress_bar.setValue(70)
+        self.current_worker = PromptifyThread(text, self.model_selector.currentText(), self.state)
+
+        self.current_worker.promptify_finished.connect(self.display_refined_text)
+        self.current_worker.error_occurred.connect(self.handle_error)
+        self._worker_connections.append((self.current_worker.promptify_finished, self.display_refined_text))
+        self._worker_connections.append((self.current_worker.error_occurred, self.handle_error))
+
+        self.current_worker.start()
+        logger.info("Started Promptify worker")
+
     def display_transcription(self, text):
-        self.transcription_box.setText(text)
+        self.transcription_box.setPlainText(text)
         self.current_transcription = text
         self.progress_bar.setValue(50)
 
@@ -2303,7 +2563,7 @@ class AudioTranscriberApp(QWidget):
             self.update_quality_display(audio_analysis.quality)
 
     def display_refined_text(self, text):
-        self.refined_box.setText(text)
+        self.refined_box.setPlainText(text)
         self.progress_bar.setValue(100)
         self.set_button_style("ready")
 
