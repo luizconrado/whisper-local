@@ -1051,7 +1051,7 @@ Scope implemented:
 7. Best-effort Ollama model release with bounded timeout and `keep_alive=0` unload requests.
 8. Shutdown intake freeze gates on recording/transcription/refine/promptify/UI mutation paths.
 
-Key code anchors (current working tree, including hardening follow-up):
+Key code anchors (current code, including hardening follow-up):
 
 1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:354`
 2. Hook setup: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2366`
@@ -1108,7 +1108,7 @@ Use this as a fast navigation index before reintroducing code from stash:
 | I/J runtime tuning | `OLLAMA_KEEP_ALIVE`, warmup, telemetry fields, dynamic chat options | `TranscriptionThread.refine_text` (`...Hybrid_v5.py:2044`), `TranscriptionThread.promptify_text` (`...Hybrid_v5.py:2099`), `RefinementThread.refine_text` (`...Hybrid_v5.py:2191`), `PromptifyThread.promptify_text` (`...Hybrid_v5.py:2288`) |
 | M adaptive budgeting | `_estimate_tokens_from_text`, `_estimate_tokens_from_messages`, `_desired_output_tokens`, `_plan_ollama_budget`, `_split_text_by_token_budget` | helper-function region before worker classes; then same Ollama call anchors above |
 | O/Q fallback + hardening | `_ollama_chat_with_ctx_fallback`, optional `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`, richer diagnostics | helper-function region + all chat call sites (`...Hybrid_v5.py:2074`, `...Hybrid_v5.py:2123`, `...Hybrid_v5.py:2220`, `...Hybrid_v5.py:2311`) |
-| R/S graceful shutdown | `aboutToQuit` wiring, `_graceful_shutdown`, global cancel/wait/join, unload flow | Implemented in `HEAD`; hardening present at `UnixSignalBridge` (`...Hybrid_v5.py:354`), hook setup (`...Hybrid_v5.py:2366`), shutdown coordinator (`...Hybrid_v5.py:3286`), and `closeEvent` delegation (`...Hybrid_v5.py:3354`) |
+| R/S graceful shutdown | `aboutToQuit` wiring, `_graceful_shutdown`, global cancel/wait/join, unload flow | Implemented in `HEAD`; hardening is also in `HEAD` at `UnixSignalBridge` (`...Hybrid_v5.py:354`), hook setup (`...Hybrid_v5.py:2366`), shutdown coordinator (`...Hybrid_v5.py:3286`), and `closeEvent` delegation (`...Hybrid_v5.py:3354`) |
 
 ### 13.1 Runtime Tuning Baseline (Phase I/J) — Stash-only Features
 
