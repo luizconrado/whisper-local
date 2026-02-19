@@ -70,6 +70,51 @@ Open work checklist:
 5. `[ ]` Phase R/S graceful shutdown coordinator
 6. `[ ]` Optional: re-test temporary Phase H `glm ctx_num=8192` experiment
 
+Runtime dependency baseline for onboarding:
+
+1. Core runtime libraries expected: `PyQt5`, `pyaudio`, `mlx_whisper`, `ollama`.
+2. Optional-but-impactful libraries:
+   - `scipy` (audio processing quality path)
+   - `webrtcvad` (VAD path; fallback silence detection is used if missing)
+   - `psutil` (memory telemetry)
+   - `tiktoken` (only part of stash-only hardening arc, not active in current HEAD)
+3. Pre-coding sanity check:
+
+```bash
+cd /Users/luizconrado/PycharmProjects/whisper-local
+python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+python3 - <<'PY'
+mods = ["PyQt5", "pyaudio", "mlx_whisper", "ollama", "scipy", "webrtcvad", "psutil"]
+for m in mods:
+    try:
+        __import__(m)
+        print(f"[OK] {m}")
+    except Exception as e:
+        print(f"[MISS] {m}: {e.__class__.__name__}")
+PY
+```
+
+Dependency-to-code-path mapping:
+
+| Dependency | Why it exists in this app | Current code anchors |
+|---|---|---|
+| `PyQt5` | GUI, signals/threads, lifecycle | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:77`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2103` |
+| `pyaudio` | microphone capture + stream handling | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:76`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:1385` |
+| `mlx_whisper` | transcription engine and model wrappers | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:84`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:268` |
+| `ollama` | refine/promptify model calls | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:85`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:1848` |
+| `scipy` (optional) | higher-quality audio preprocessing path | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:105`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:900` |
+| `webrtcvad` (optional) | voice activity detection path | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:115`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:1160` |
+| `psutil` (optional) | memory telemetry | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:97`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:339` |
+| `tiktoken` (stash-only arc) | tighter token counting for Phase O/Q experiments | `stash@{0}` only (not present in current HEAD) |
+
+Mandatory preflight before Phase I+ reimplementation:
+
+1. Verify canonical state commands from Section `0`.
+2. Verify stash integrity and pin durable ref (`handover-phase-i-arc`) from Section `5`/`14`.
+3. Capture baseline compile + option snapshots (commands in Section `14`).
+4. Run one baseline smoke pass (refine + promptify) and save logs for before/after comparison.
+5. If you add optional dependencies during rollout (for example `tiktoken`), rerun the sanity-check import block before continuing.
+
 ---
 
 ## B) Navigation Map
@@ -90,14 +135,15 @@ Use this map to find exactly what you need:
 
 ---
 
-## 0) Current Canonical State (Verified Now)
+## 0) Current Canonical State (Last Verified Checkpoint)
 
 - Branch: `main`
-- Current HEAD: `1a6e1b7`
+- Current HEAD: `ff704c1`
 - Current upstream: `origin/main`
 - Rollback anchor commit (runtime baseline): `6a61314`
-- Working-tree state during this revision: one modified tracked file (`HANDOVER_2026-02-19_PROMPT_MODEL_ROLLBACK.md`)
+- Working-tree state at checkpoint time: clean
 - Stash entries: `stash@{0}` exists with model/performance/shutdown experiments
+- Verification timestamp: `2026-02-19` (refresh before implementation work)
 
 Commands used to verify now:
 
@@ -110,12 +156,17 @@ git log --oneline -n 15
 git stash list
 ```
 
-Observed now:
+Observed at checkpoint time:
 
-- `git status --short` -> `M HANDOVER_2026-02-19_PROMPT_MODEL_ROLLBACK.md`
-- `HEAD` -> `1a6e1b7`
+- `git status --short` -> _no output_ (clean tree)
+- `HEAD` -> `ff704c1`
 - rollback anchor -> `6a61314`
 - `stash@{0}` -> `On main: WIP model tuning + shutdown experiments backup`
+
+Canonical-state rule:
+
+1. If values above diverge from live commands, trust live command output and update this section first.
+2. Do not start open-phase reimplementation until this section matches repository reality.
 
 ---
 
@@ -145,7 +196,11 @@ These are the key commits the session referenced/produced:
    Message: `Add rollback handover with full session reconstruction`  
    Adds this handover document to repository history.
 
-No committed code from the runtime-tuning/shutdown experimental arc (Phases I onward) was retained; that arc remains in `stash@{0}` and backup patch artifacts.
+6. `ff704c1`  
+   Message: `Expand handover with onboarding runbook and phase clarity`  
+   Adds structured onboarding/navigation and richer reconstruction guidance.
+
+No committed code from the runtime-tuning/shutdown experimental arc (Phases I onward) was retained; that arc remains in `stash@{0}` (`344b0fa`) and backup patch artifacts.
 
 ---
 
@@ -164,7 +219,7 @@ The work happened in three major waves:
 3. **Regression + rollback wave (stable recovery)**
 - User observed memory spikes and empty model outputs.
 - Decision made to revert to state right after prompt improvements and pre-performance tuning arc.
-- Local experiments preserved in stash and patch; core runtime baseline anchored at `6a61314`, followed by prompt/handover commits (`5947940`, `1a6e1b7`) that did not reintroduce Phase-I+ runtime tuning.
+- Local experiments preserved in stash and patch; core runtime baseline anchored at `6a61314`, followed by prompt/handover commits (`5947940`, `1a6e1b7`, `ff704c1`) that did not reintroduce Phase-I+ runtime tuning.
 
 ---
 
@@ -614,7 +669,7 @@ Recorded outcome:
 Context note:
 
 - `6a61314` is the **rollback/runtime anchor** used for stable-vs-experimental comparisons.
-- Current repository tip is newer (`1a6e1b7`) and includes post-rollback documentation/prompt commits.
+- Current repository tip is newer (`ff704c1`) and includes post-rollback documentation/prompt commits.
 
 ### Confirm current state and stash anchor
 
@@ -625,6 +680,26 @@ git rev-parse --short HEAD
 git log --oneline -n 6
 git stash list
 git show --no-patch --pretty=fuller stash@{0}
+```
+
+### Make the stash reference durable before any stash operations
+
+`stash@{0}` is positional and can move. Pin it to a hash/tag first:
+
+```bash
+cd /Users/luizconrado/PycharmProjects/whisper-local
+STASH_HASH=$(git rev-parse stash@{0})
+echo "$STASH_HASH"  # expected: 344b0fa0073e20049d9f14f995e7d7bafc30e281
+git tag -fa handover-phase-i-arc "$STASH_HASH" -m "Pinned stash snapshot for Phase I+ reconstruction"
+```
+
+Fallback if `stash@{0}` no longer exists:
+
+```bash
+# Use pinned tag or known commit hash directly
+git show handover-phase-i-arc:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+# or
+git show 344b0fa0073e20049d9f14f995e7d7bafc30e281:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
 ```
 
 ### Compare current HEAD vs stash snapshot
@@ -692,20 +767,74 @@ Recommended order:
 7. introduce one feature per commit with targeted smoke matrix
 - quick bisect path if regressions reappear
 
+Mandatory phase gate:
+
+1. Do not start phase `N+1` until phase `N` has:
+- a dedicated commit hash,
+- Section `7` validation evidence captured,
+- and explicit pass/fail notes for that phase criteria in Section `13.6`.
+
 ---
 
 ## 7) Validation Matrix to Run After Each Reintroduced Step
 
-1. Record -> Stop -> Transcribe -> Refine
-2. Record -> Stop -> Transcribe -> Promptify (selected mode)
-3. Long transcript (well punctuated)
-4. Long transcript (poor punctuation)
-5. Multi-language text fragment
-6. Repeated runs for memory trend
-7. App close while idle
-8. App close while recording
-9. App close while processing
-10. Verify no empty final outputs on normal cases
+Run these after every phase-level increment and capture evidence in your PR/commit notes:
+
+1. Record -> Stop -> Transcribe -> Refine  
+Expected: output non-empty; no mode mismatch; no unhandled exception in logs.
+2. Record -> Stop -> Transcribe -> Promptify (selected mode)  
+Expected: promptify path is used automatically when selected; output non-empty.
+3. Long transcript (well punctuated)  
+Expected: no context-window crash; fidelity retained.
+4. Long transcript (poor punctuation)  
+Expected: fallback/chunking (if enabled) is stable and merged output remains readable.
+5. Multi-language text fragment  
+Expected: no language corruption from estimator/planner changes.
+6. Repeated runs for memory trend (`>=20` mixed runs)  
+Expected: no runaway growth; no empty outputs.
+7. App close while idle  
+Expected: exits cleanly with no hanging worker/thread.
+8. App close while recording  
+Expected: recording thread cancels/joins; app exits.
+9. App close while processing  
+Expected: workers cancel/join within timeout; app exits.
+10. Verify no empty final outputs on normal cases  
+Expected: 0 empty responses in normal-path runs.
+
+Evidence capture minimum:
+
+1. Command outputs from Section `14` comparison/retrieval checks.
+2. Runtime logs showing success/failure for each item above.
+3. `python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py` success after each increment.
+
+Definitions and measurable gates:
+
+1. Empty output = final model text where `len(text.strip()) == 0`.
+2. Memory trend baseline = capture RSS peak from 5 baseline runs before phase changes.
+3. Fail memory gate if:
+- median RSS peak after phase increases by more than `35%` versus baseline, or
+- any single run exceeds `2.0x` baseline median.
+
+Evidence storage template (recommended):
+
+```bash
+PHASE_TAG=phase-i-j
+STAMP=$(date +%Y%m%d-%H%M%S)
+OUT_DIR=/tmp/whisper-phase-validation/$PHASE_TAG/$STAMP
+mkdir -p "$OUT_DIR"
+
+# capture git + stash context
+git status --short > "$OUT_DIR/git-status.txt"
+git rev-parse --short HEAD > "$OUT_DIR/head.txt"
+git stash list > "$OUT_DIR/stash-list.txt"
+
+# capture current option-related anchors
+rg -n "ollama.chat\\(|keep_alive|num_predict|num_ctx|_plan_ollama_budget|_ollama_chat_with_ctx_fallback" \
+  GUI-whisper-chat-mode_colored_button_Hybrid_v5.py > "$OUT_DIR/option-anchors.txt"
+
+# compile check
+python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py > "$OUT_DIR/py-compile.txt" 2>&1
+```
 
 ---
 
@@ -724,12 +853,15 @@ Recommended order:
 
 ## 9) Known Artifacts and Pointers
 
-- Current canonical HEAD commit: `1a6e1b7`
+- Current canonical HEAD commit: `ff704c1`
+- Handover base reconstruction commit: `1a6e1b7`
 - Post-rollback GLM prompt refinement commit: `5947940`
+- Handover onboarding/phase-clarity extension commit: `ff704c1`
 - Stable runtime anchor commit: `6a61314`
 - Promptify enhancement commit: `5bd8a65`
 - Pre-session foundational commit: `8f1a6e6`
 - Stash of experimental arc: `stash@{0}`
+- Stash commit hash (durable): `344b0fa0073e20049d9f14f995e7d7bafc30e281`
 - Backup patch artifact: `/tmp/whisper-local-pre-rollback-20260219-020752.patch`
 - Main implementation file: `/Users/luizconrado/PycharmProjects/whisper-local/GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`
 
@@ -759,7 +891,7 @@ Three reference snapshots used:
    Commit message: `Add Hybrid v5 transcriber with Ollama 0.6 API compatibility`  
    Line count snapshot: `2453`
 
-2. **Current active version**: `HEAD` = `1a6e1b7` (includes follow-up commit `5947940`)  
+2. **Current active version**: `HEAD` = `ff704c1` (includes follow-up commits `5947940`, `1a6e1b7`, `ff704c1`)  
    Line count now: `2799`
 
 3. **After all implementations (pre-rollback, regression period)**: `stash@{0}` (`344b0fa`)  
@@ -781,6 +913,12 @@ Status keys used:
 - `Implemented`: active in current `HEAD`
 - `Partial`: historically done in session, but not active now as code behavior/value
 - `Not Implemented (Current)`: absent in current `HEAD`; available only in stash/patch/history
+
+Important provenance note:
+
+1. Phases `I/J`, `M`, `O`, `Q`, and `R/S` do **not** have per-phase committed SHAs in current branch history.
+2. Their reconstruction source is `stash@{0}` (`344b0fa0073e20049d9f14f995e7d7bafc30e281`) plus patch artifacts.
+3. Reintroduction must follow strict order (`I/J` -> `M` -> `O/Q` -> `R/S`) with one commit per phase family.
 
 | Phase / Task | Before (`6c816e6`) | Current (`HEAD`) | After-all (`stash@{0}`) | Current Status | Evidence |
 |---|---|---|---|---|---|
@@ -828,6 +966,17 @@ Status keys used:
 ## 13) Open-Task Reconstruction Pack (What After-All Had That Current Does Not)
 
 This section is intentionally detailed so future agents can reintroduce features from Phase I onward safely and in isolation.
+
+### 13.0 Open-Phase Symbol-to-Anchor Map (Current file insertion points)
+
+Use this as a fast navigation index before reintroducing code from stash:
+
+| Open Phase | Stash-only symbols/features | Current file anchor(s) to patch |
+|---|---|---|
+| I/J runtime tuning | `OLLAMA_KEEP_ALIVE`, warmup, telemetry fields, dynamic chat options | `TranscriptionThread.refine_text` (`...Hybrid_v5.py:1819`), `TranscriptionThread.promptify_text` (`...Hybrid_v5.py:1873`), `RefinementThread.refine_text` (`...Hybrid_v5.py:1964`), `PromptifyThread.promptify_text` (`...Hybrid_v5.py:2060`) |
+| M adaptive budgeting | `_estimate_tokens_from_text`, `_estimate_tokens_from_messages`, `_desired_output_tokens`, `_plan_ollama_budget`, `_split_text_by_token_budget` | helper-function region before worker classes; then same Ollama call anchors above |
+| O/Q fallback + hardening | `_ollama_chat_with_ctx_fallback`, optional `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`, richer diagnostics | helper-function region + all `ollama.chat` call sites (`...Hybrid_v5.py:1848`, `...Hybrid_v5.py:1896`, `...Hybrid_v5.py:1992`, `...Hybrid_v5.py:2082`) |
+| R/S graceful shutdown | `aboutToQuit` wiring, `_graceful_shutdown`, global cancel/wait/join, unload flow | `AudioTranscriberApp` init (`...Hybrid_v5.py:2103`) and `AudioTranscriberApp.closeEvent` (`...Hybrid_v5.py:2768`) with `AppState` worker registry (`...Hybrid_v5.py:1306`) |
 
 ### 13.1 Runtime Tuning Baseline (Phase I/J) — Stash-only Features
 
@@ -896,6 +1045,22 @@ Why it is currently absent:
 | `OLLAMA_WARMUP_ENABLED` | `True` | Enables Ollama warmup call path. |
 | `MLX_CLEAR_CACHE_EVERY_N_CHUNKS` | `2` | Periodic cache clear cadence in chunk loop. |
 | `MLX_CLEAR_CACHE_MEMORY_MB` | `0` | Memory-threshold gate for cache clear (`0` disables thresholding). |
+
+#### 13.1.b Recommended conservative rollout profile for first reintroduction pass
+
+Use this profile initially to reduce regression risk while validating Phase I/J plumbing:
+
+```bash
+export OLLAMA_KEEP_ALIVE=10m
+export OLLAMA_WARMUP_ENABLED=true
+export OLLAMA_AUTO_BUMP_ENABLED=false
+export OLLAMA_AUTO_BUMP_BEYOND_CONFIG=false
+export OLLAMA_NUM_PREDICT_MIN=256
+export OLLAMA_NUM_PREDICT_MAX_REFINE=4096
+export OLLAMA_NUM_PREDICT_MAX_PROMPTIFY=4096
+```
+
+After stable validation, tune upward intentionally and re-run Section `7`.
 
 ### 13.2 Adaptive Budgeting Core (Phase M) — Stash-only Functions
 
@@ -1009,6 +1174,36 @@ Current gap:
 
 1. Current HEAD still uses direct chat calls with fixed option set, without this planning/fallback layer.
 
+Current-to-target mini integration sketch (for each `ollama.chat` call site):
+
+```python
+# Current HEAD pattern (simplified)
+chat_kwargs = {
+    "model": model_name,
+    "messages": messages,
+    "stream": False,
+    "options": {"num_ctx": cfg.ctx_num, "temperature": cfg.temperature, "seed": cfg.seed},
+}
+response = ollama.chat(**chat_kwargs)
+
+# Phase I/M/O target pattern (simplified)
+source_tokens = _estimate_tokens_from_text(source_text)
+plan = _plan_ollama_budget(cfg.ctx_num, messages, mode=mode, source_tokens=source_tokens)
+chat_kwargs = {
+    "model": model_name,
+    "messages": messages,
+    "stream": False,
+    "keep_alive": OLLAMA_KEEP_ALIVE,
+    "options": {
+        "num_ctx": plan["num_ctx"],
+        "temperature": cfg.temperature,
+        "seed": cfg.seed,
+        "num_predict": plan["num_predict"],
+    },
+}
+response, used_num_ctx, used_num_predict = _ollama_chat_with_ctx_fallback(...)
+```
+
 ### 13.5 Graceful Shutdown Orchestration (Phases R/S) — Stash-only
 
 What existed in after-all snapshot:
@@ -1037,6 +1232,7 @@ def _graceful_shutdown(self, reason: str, timeout_ms: int = 12000) -> bool:
 Current gap:
 
 1. Current HEAD retains simpler close handling and does not include this centralized coordinator.
+2. Current HEAD has no `aboutToQuit`-coordinated shutdown path and no signal-driven shutdown coordinator from the stash-only arc.
 
 ### 13.6 Proposed Phase-Specific Acceptance Criteria (to reduce reimplementation ambiguity)
 
@@ -1078,6 +1274,16 @@ Pass if all are true:
 4. PyAudio/model resource cleanup occurs without fatal exceptions.
 5. Shutdown flow is idempotent (`aboutToQuit` + `closeEvent` do not double-fail).
 
+### 13.7 Logging Proof Points (what reviewers should be able to grep)
+
+Use these as concrete audit targets after each phase increment:
+
+1. Phase I/J: log entries containing `load_duration`, `prompt_eval_duration`, `eval_duration`, and the effective `num_ctx`/`num_predict`.
+2. Phase M: log planner decisions (`source_tokens`, planned `num_ctx`, planned `num_predict`, `should_chunk`).
+3. Phase O/Q: log fallback attempts (`context retry`, initial failure reason, retry context), and whether `tiktoken` path or heuristic path was used.
+4. Phase O/Q: when cache controls are active, log `MLX_CLEAR_CACHE_MEMORY_MB` decision inputs and whether cache clear executed.
+5. Phase R/S: log shutdown lifecycle markers (`shutdown_started`, worker cancel summary, join outcomes, `shutdown_completed`).
+
 ---
 
 ## 14) Retrieval Commands for Future Reimplementation (Phase I -> End)
@@ -1090,9 +1296,15 @@ cd /Users/luizconrado/PycharmProjects/whisper-local
 # identify stash snapshot used in this handover
 git stash list
 git show --no-patch --pretty=fuller stash@{0}
+git rev-parse stash@{0}
+
+# optional: pin to stable tag before any stash operations
+git tag -fa handover-phase-i-arc "$(git rev-parse stash@{0})" -m "Pinned stash snapshot for Phase I+ reconstruction"
 
 # inspect full file at after-all state
 git show stash@{0}:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+# or durable reference
+git show handover-phase-i-arc:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
 
 # inspect only open-task symbols (I onward)
 git show stash@{0}:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py | \
@@ -1100,6 +1312,10 @@ git show stash@{0}:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py | \
 
 # compare current HEAD vs after-all snapshot
 git diff HEAD..stash@{0} -- GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+
+# snapshot current-head call patterns before editing (baseline proof)
+rg -n "ollama.chat\\(|num_ctx|temperature|seed|num_predict|keep_alive|aboutToQuit|closeEvent" \
+  GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
 ```
 
 Selective recovery approach (recommended):
@@ -1111,5 +1327,12 @@ git checkout -b codex/reintroduce-phase-i-plus
 # selectively recover hunks from stash
 git checkout -p stash@{0} -- GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
 ```
+
+Pre-Phase-I baseline smoke checklist:
+
+1. Run one short recording with selected action `Refine Text` and confirm non-empty output.
+2. Run one short recording with selected action `Promptify Text` and confirm non-empty output.
+3. Save logs/output notes under `/tmp/whisper-phase-validation/baseline/<timestamp>/`.
+4. Only then start Phase I/J edits.
 
 This section is intended to let future agents reproduce the missing arc with traceability and controlled incremental reintroduction.
