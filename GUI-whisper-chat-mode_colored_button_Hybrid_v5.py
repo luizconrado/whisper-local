@@ -56,6 +56,7 @@ import sys
 import re
 import logging
 import threading
+import signal as py_signal
 import datetime
 import wave
 import io
@@ -66,6 +67,9 @@ import json
 import math  # for isnan checks in confidence display
 import gc
 import inspect
+import urllib.request
+import urllib.error
+import weakref
 from dataclasses import dataclass
 from functools import partial, wraps
 from contextlib import contextmanager
@@ -79,7 +83,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QTextEdit, QProgressBar, QComboBox, QMessageBox, QLabel,
     QProgressDialog, QToolButton, QMenu, QAction, QSizePolicy
 )
-from PyQt5.QtCore import pyqtSignal, QThread, QObject, Qt
+from PyQt5.QtCore import pyqtSignal, QThread, QObject, Qt, QSocketNotifier
 
 import mlx_whisper
 import ollama
@@ -231,6 +235,187 @@ WHISPER_MODEL_REPO = "mlx-community/whisper-large-v3-mlx"
 
 # Single-call threshold (seconds)
 SINGLE_CALL_LIMIT_SEC = 60.0
+
+# Shutdown behavior defaults (bounded best-effort cleanup).
+SHUTDOWN_TIMEOUT_MS = 12000
+SHUTDOWN_WORKER_WAIT_MS = 6000
+SHUTDOWN_RECORDING_WAIT_MS = 3000
+SHUTDOWN_OLLAMA_TIMEOUT_SEC = 1.5
+
+_OLLAMA_MODEL_USAGE_LOCK = threading.Lock()
+_OLLAMA_MODELS_USED: set = set()
+_APP: Optional[QApplication] = None
+
+
+def _track_ollama_model_usage(model_name: Optional[str]) -> None:
+    if not model_name:
+        return
+    with _OLLAMA_MODEL_USAGE_LOCK:
+        _OLLAMA_MODELS_USED.add(str(model_name))
+
+
+def _snapshot_tracked_ollama_models() -> List[str]:
+    with _OLLAMA_MODEL_USAGE_LOCK:
+        return sorted(_OLLAMA_MODELS_USED)
+
+
+def _clear_tracked_ollama_models() -> None:
+    with _OLLAMA_MODEL_USAGE_LOCK:
+        _OLLAMA_MODELS_USED.clear()
+
+
+def _get_ollama_base_url() -> str:
+    raw = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").strip()
+    if not raw:
+        raw = "http://127.0.0.1:11434"
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    return raw.rstrip("/")
+
+
+def _query_ollama_running_models(timeout_sec: float = SHUTDOWN_OLLAMA_TIMEOUT_SEC) -> List[str]:
+    url = f"{_get_ollama_base_url()}/api/ps"
+    request = urllib.request.Request(url=url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception as e:
+        logger.debug(f"Could not query running Ollama models: {e}")
+        return []
+
+    models = payload.get("models", []) if isinstance(payload, dict) else []
+    names = []
+    for model_entry in models:
+        if isinstance(model_entry, dict):
+            name = model_entry.get("model") or model_entry.get("name")
+        else:
+            name = getattr(model_entry, "model", None) or getattr(model_entry, "name", None)
+        if name:
+            names.append(str(name))
+    return names
+
+
+def _request_ollama_model_unload(model_name: str, timeout_sec: float = SHUTDOWN_OLLAMA_TIMEOUT_SEC) -> bool:
+    """
+    Best-effort model unload request.
+    Ollama supports unloading by issuing generate/chat with keep_alive=0.
+    """
+    payload = {
+        "model": model_name,
+        "prompt": "",
+        "stream": False,
+        "keep_alive": 0,
+        "options": {
+            "temperature": 0.0,
+            "num_predict": 1
+        }
+    }
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url=f"{_get_ollama_base_url()}/api/generate",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            _ = response.read()
+        logger.info(f"Requested Ollama unload for model '{model_name}'")
+        return True
+    except urllib.error.HTTPError as e:
+        details = ""
+        try:
+            details = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        logger.warning(f"Ollama unload HTTP error for '{model_name}': {e.code} {details}")
+    except Exception as e:
+        logger.warning(f"Ollama unload request failed for '{model_name}': {e}")
+    return False
+
+
+class UnixSignalBridge(QObject):
+    """Bridge Unix signals into Qt event loop using a self-pipe."""
+    signal_received = pyqtSignal(int)
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._read_fd: Optional[int] = None
+        self._write_fd: Optional[int] = None
+        self._notifier: Optional[QSocketNotifier] = None
+        self._installed_signals: Dict[int, Any] = {}
+
+    def install(self, signums: List[int]) -> bool:
+        if os.name != "posix":
+            logger.info("Unix signal bridge skipped: non-posix platform.")
+            return False
+
+        self._read_fd, self._write_fd = os.pipe()
+        os.set_blocking(self._read_fd, False)
+        os.set_blocking(self._write_fd, False)
+
+        self._notifier = QSocketNotifier(self._read_fd, QSocketNotifier.Read, self)
+        self._notifier.activated.connect(self._on_pipe_activated)
+
+        for signum in signums:
+            try:
+                self._installed_signals[signum] = py_signal.getsignal(signum)
+                py_signal.signal(signum, self._handle_signal)
+            except Exception as e:
+                logger.warning(f"Could not install signal handler for {signum}: {e}")
+
+        return bool(self._installed_signals)
+
+    def close(self) -> None:
+        if self._notifier is not None:
+            try:
+                self._notifier.setEnabled(False)
+                self._notifier.deleteLater()
+            except Exception:
+                pass
+            self._notifier = None
+
+        for signum, previous_handler in list(self._installed_signals.items()):
+            try:
+                py_signal.signal(signum, previous_handler)
+            except Exception:
+                pass
+        self._installed_signals.clear()
+
+        for fd in (self._read_fd, self._write_fd):
+            if fd is None:
+                continue
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._read_fd = None
+        self._write_fd = None
+
+    def _handle_signal(self, signum, _frame) -> None:
+        if self._write_fd is None:
+            return
+        try:
+            os.write(self._write_fd, bytes((signum & 0xFF,)))
+        except OSError:
+            pass
+
+    def _on_pipe_activated(self, _fd: int) -> None:
+        if self._read_fd is None:
+            return
+        try:
+            while True:
+                data = os.read(self._read_fd, 64)
+                if not data:
+                    break
+                for value in data:
+                    self.signal_received.emit(int(value))
+                if len(data) < 64:
+                    break
+        except BlockingIOError:
+            return
+        except Exception as e:
+            logger.warning(f"Failed to drain signal pipe: {e}")
 
 # --------------------------
 # MLX Memory Management and Optional Model Reuse
@@ -1845,6 +2030,7 @@ class TranscriptionThread(QThread):
             if config.think is not None:
                 chat_kwargs['think'] = config.think
 
+            _track_ollama_model_usage(self.model_name)
             response = ollama.chat(**chat_kwargs)
 
             # When think=True, Ollama routes reasoning to message.thinking and
@@ -1893,6 +2079,7 @@ class TranscriptionThread(QThread):
             if model_config.think is not None:
                 chat_kwargs['think'] = model_config.think
 
+            _track_ollama_model_usage(self.model_name)
             response = ollama.chat(**chat_kwargs)
             raw_content = response.message.content or ''
             if model_config.think is None:
@@ -1989,6 +2176,7 @@ class RefinementThread(QThread):
             if config.think is not None:
                 chat_kwargs['think'] = config.think
 
+            _track_ollama_model_usage(self.model_name)
             response = ollama.chat(**chat_kwargs)
 
             # When think=True, Ollama routes reasoning to message.thinking and
@@ -2079,6 +2267,7 @@ class PromptifyThread(QThread):
             if model_config.think is not None:
                 chat_kwargs['think'] = model_config.think
 
+            _track_ollama_model_usage(self.model_name)
             response = ollama.chat(**chat_kwargs)
             raw_content = response.message.content or ''
             if model_config.think is None:
@@ -2118,18 +2307,215 @@ class AudioTranscriberApp(QWidget):
         self.current_transcription = ""
         self.current_worker = None
         self._worker_connections = []
+        self._known_workers = weakref.WeakSet()
+        self._recording_thread: Optional[threading.Thread] = None
+        self._recording_thread_lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_started = False
+        self._shutdown_completed = False
+        self._shutdown_reason = ""
+        self._signal_bridge: Optional[UnixSignalBridge] = None
 
         self._transcription_ready.connect(self._handle_transcription_ready)
         self._recording_failed.connect(self._handle_recording_failed)
 
         self.init_ui()
+        self._setup_shutdown_hooks()
         threading.Thread(target=TranscriberWarmup.warm, daemon=True).start()
 
+    def _setup_shutdown_hooks(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._on_about_to_quit)
+
+        signal_candidates = []
+        for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+            signum = getattr(py_signal, signal_name, None)
+            if signum is not None:
+                signal_candidates.append(signum)
+
+        if signal_candidates:
+            bridge = UnixSignalBridge(self)
+            if bridge.install(signal_candidates):
+                bridge.signal_received.connect(self._on_termination_signal)
+                self._signal_bridge = bridge
+                logger.info("Installed Unix signal bridge for graceful shutdown.")
+            else:
+                bridge.close()
+        else:
+            logger.info("No installable process signals found for graceful shutdown.")
+
+    def _cleanup_shutdown_hooks(self) -> None:
+        if self._signal_bridge is not None:
+            try:
+                self._signal_bridge.close()
+            except Exception as e:
+                logger.debug(f"Failed to close signal bridge cleanly: {e}")
+            self._signal_bridge = None
+
+    def _is_shutting_down(self) -> bool:
+        with self._shutdown_lock:
+            return self._shutdown_started
+
+    def _mark_shutdown_started(self, reason: str) -> bool:
+        with self._shutdown_lock:
+            if self._shutdown_started:
+                return False
+            self._shutdown_started = True
+            self._shutdown_reason = reason
+            return True
+
+    def _mark_shutdown_completed(self) -> None:
+        with self._shutdown_lock:
+            self._shutdown_completed = True
+
+    def _track_worker(self, worker: Optional[QThread]) -> None:
+        if worker is None:
+            return
+        try:
+            self._known_workers.add(worker)
+        except TypeError:
+            logger.debug("Could not track worker in weak set.")
+
+    def _snapshot_workers(self) -> List[QThread]:
+        workers = [worker for worker in self._known_workers if worker is not None]
+        if self.current_worker is not None and self.current_worker not in workers:
+            workers.append(self.current_worker)
+        return workers
+
+    def _set_shutdown_ui_state(self) -> None:
+        self._set_action_buttons_enabled(False)
+        if hasattr(self, 'recording_button'):
+            self.recording_button.setEnabled(False)
+        if hasattr(self, 'model_selector'):
+            self.model_selector.setEnabled(False)
+        if hasattr(self, 'language_selector'):
+            self.language_selector.setEnabled(False)
+        if hasattr(self, 'sensitivity_selector'):
+            self.sensitivity_selector.setEnabled(False)
+
+    def _cancel_all_workers(self) -> int:
+        workers = self._snapshot_workers()
+        cancelled = 0
+        for worker in workers:
+            try:
+                if hasattr(worker, 'cancel'):
+                    worker.cancel()
+                cancelled += 1
+            except Exception as e:
+                logger.warning(f"Failed to cancel worker {worker}: {e}")
+        return cancelled
+
+    def _wait_for_workers(self, timeout_ms: int) -> Dict[str, int]:
+        workers = self._snapshot_workers()
+        deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
+        waited = 0
+        timed_out = 0
+
+        for worker in workers:
+            is_running = False
+            try:
+                is_running = worker.isRunning()
+            except Exception:
+                continue
+
+            if not is_running:
+                continue
+
+            remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
+            if remaining_ms <= 0:
+                timed_out += 1
+                continue
+
+            waited += 1
+            try:
+                if not worker.wait(remaining_ms):
+                    timed_out += 1
+                    logger.warning(f"Worker did not stop before timeout: {worker}")
+            except Exception as e:
+                timed_out += 1
+                logger.warning(f"Error while waiting for worker {worker}: {e}")
+
+        return {"waited": waited, "timed_out": timed_out}
+
+    def _wait_for_recording_thread(self, timeout_ms: int) -> bool:
+        with self._recording_thread_lock:
+            recording_thread = self._recording_thread
+
+        if recording_thread is None:
+            return True
+        if not recording_thread.is_alive():
+            return True
+        if recording_thread is threading.current_thread():
+            return False
+
+        try:
+            recording_thread.join(max(0.0, timeout_ms / 1000.0))
+        except Exception as e:
+            logger.warning(f"Error joining recording thread: {e}")
+            return False
+        return not recording_thread.is_alive()
+
+    def _terminate_pyaudio_singleton(self) -> None:
+        if AudioRecorder._pyaudio_instance is None:
+            return
+        try:
+            AudioRecorder._pyaudio_instance.terminate()
+            logger.info("PyAudio singleton terminated")
+        except Exception as e:
+            logger.warning(f"PyAudio termination failed: {e}")
+        finally:
+            AudioRecorder._pyaudio_instance = None
+
+    def _release_model_resources(self, timeout_sec: float) -> None:
+        tracked_models = _snapshot_tracked_ollama_models()
+        if not tracked_models:
+            return
+
+        running_models = set(_query_ollama_running_models(timeout_sec=timeout_sec))
+        unload_targets = [name for name in tracked_models if name in running_models]
+
+        if not unload_targets:
+            _clear_tracked_ollama_models()
+            return
+
+        unload_deadline = time.monotonic() + max(0.0, timeout_sec)
+        for model_name in unload_targets:
+            remaining = unload_deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("Skipping remaining Ollama unload calls: shutdown unload budget exhausted.")
+                break
+            _request_ollama_model_unload(model_name, timeout_sec=max(0.1, remaining))
+        _clear_tracked_ollama_models()
+
+    def _on_about_to_quit(self) -> None:
+        self._graceful_shutdown(reason="aboutToQuit", timeout_ms=SHUTDOWN_TIMEOUT_MS)
+
+    def _on_termination_signal(self, signal_number: int) -> None:
+        signal_name = str(signal_number)
+        if hasattr(py_signal, "Signals"):
+            try:
+                signal_name = py_signal.Signals(signal_number).name
+            except Exception:
+                pass
+
+        logger.warning(f"Received termination signal: {signal_name}")
+        self._graceful_shutdown(reason=f"signal:{signal_name}", timeout_ms=SHUTDOWN_TIMEOUT_MS)
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def _handle_transcription_ready(self, audio_data: bytes):
+        if self._is_shutting_down():
+            logger.info("Ignoring transcription-ready event during shutdown.")
+            return
         self.current_transcription = ""
         self.start_transcription(audio_data)
 
     def _handle_recording_failed(self):
+        if self._is_shutting_down():
+            logger.info("Ignoring recording failure notification during shutdown.")
+            return
         self.display_transcription("No audio data captured.")
         self.display_refined_text("")
 
@@ -2435,10 +2821,16 @@ class AudioTranscriberApp(QWidget):
         self._set_action_buttons_enabled(state == "ready")
 
     def _set_action_buttons_enabled(self, enabled: bool):
+        if self._is_shutting_down():
+            enabled = False
         if hasattr(self, 'text_action_button'):
             self.text_action_button.setEnabled(enabled)
 
     def set_active_text_action(self, action_name: str):
+        if self._is_shutting_down():
+            logger.info("Ignoring text-action change during shutdown.")
+            return
+
         if action_name not in ("refine", "promptify"):
             action_name = "refine"
 
@@ -2454,12 +2846,19 @@ class AudioTranscriberApp(QWidget):
         logger.info(f"Text action changed to: {self.current_text_action}")
 
     def run_selected_text_action(self):
+        if self._is_shutting_down():
+            logger.info("Skipping action request: shutdown in progress.")
+            return
         if self.current_text_action == "promptify":
             self.promptify_text()
         else:
             self.re_refine_text()
 
     def toggle_recording(self):
+        if self._is_shutting_down():
+            logger.info("Cannot toggle recording during shutdown.")
+            return
+
         if self.state.has_active_threads:
             logger.warning("Cannot start recording: processing still in progress")
             QMessageBox.information(self, "Processing", "Please wait for the current task to complete.")
@@ -2471,6 +2870,10 @@ class AudioTranscriberApp(QWidget):
             self.stop_recording()
 
     def start_recording(self):
+        if self._is_shutting_down():
+            logger.info("Cannot start recording during shutdown.")
+            return
+
         self.set_button_style("recording")
         self.progress_bar.setValue(0)
         self.state.is_recording = True
@@ -2502,17 +2905,31 @@ class AudioTranscriberApp(QWidget):
             }
         """)
 
-        threading.Thread(target=self.record_audio_background, daemon=True).start()
+        recording_thread = threading.Thread(
+            target=self.record_audio_background,
+            daemon=True,
+            name="record-audio-background"
+        )
+        with self._recording_thread_lock:
+            self._recording_thread = recording_thread
+        recording_thread.start()
 
     def record_audio_background(self):
+        audio_data = None
         try:
             with AudioRecorder(self.state) as recorder:
                 audio_data = recorder.record()
         except Exception as e:
             logger.error(f"Recording failed: {e}", exc_info=True)
-            audio_data = None
+        finally:
+            self.state.is_recording = False
+            with self._recording_thread_lock:
+                if self._recording_thread is threading.current_thread():
+                    self._recording_thread = None
 
-        self.state.is_recording = False
+        if self._is_shutting_down():
+            logger.info("Skipping recording follow-up emit during shutdown.")
+            return
 
         if audio_data:
             self._transcription_ready.emit(audio_data)
@@ -2520,10 +2937,16 @@ class AudioTranscriberApp(QWidget):
             self._recording_failed.emit()
 
     def stop_recording(self):
+        if self._is_shutting_down():
+            logger.info("Stop-recording requested during shutdown.")
         self.state.is_recording = False
         self.set_button_style("processing")
 
     def start_transcription(self, audio_data):
+        if self._is_shutting_down():
+            logger.info("Cannot start transcription during shutdown.")
+            return
+
         if self.state.has_active_threads:
             logger.warning("Cannot start transcription: previous task still in progress")
             QMessageBox.information(self, "Processing", "Previous audio is still being processed. Please wait.")
@@ -2567,11 +2990,16 @@ class AudioTranscriberApp(QWidget):
             forced_language=forced_language,
             post_process_mode=self.current_text_action
         )
+        self._track_worker(self.current_worker)
         self._connect_worker_signals(self.current_worker)
         self.current_worker.start()
         logger.info(f"Started new transcription worker (post-process: {self.current_text_action})")
 
     def re_refine_text(self):
+        if self._is_shutting_down():
+            logger.info("Cannot run refinement during shutdown.")
+            return
+
         text = self.transcription_box.toPlainText().strip()
         if not text:
             return
@@ -2594,6 +3022,7 @@ class AudioTranscriberApp(QWidget):
         self.set_button_style("processing")
         self.progress_bar.setValue(50)
         self.current_worker = RefinementThread(text, self.model_selector.currentText(), self.state)
+        self._track_worker(self.current_worker)
 
         self.current_worker.refinement_finished.connect(self.display_refined_text)
         self.current_worker.error_occurred.connect(self.handle_error)
@@ -2607,6 +3036,10 @@ class AudioTranscriberApp(QWidget):
         return self.transcription_box.toPlainText().strip() if hasattr(self, 'transcription_box') else ""
 
     def promptify_text(self):
+        if self._is_shutting_down():
+            logger.info("Cannot run promptify during shutdown.")
+            return
+
         text = self._get_promptify_source_text()
         if not text:
             QMessageBox.information(self, "Promptify", "There is no text available to transform into a prompt.")
@@ -2630,6 +3063,7 @@ class AudioTranscriberApp(QWidget):
         self.set_button_style("processing")
         self.progress_bar.setValue(70)
         self.current_worker = PromptifyThread(text, self.model_selector.currentText(), self.state)
+        self._track_worker(self.current_worker)
 
         self.current_worker.promptify_finished.connect(self.display_refined_text)
         self.current_worker.error_occurred.connect(self.handle_error)
@@ -2640,6 +3074,9 @@ class AudioTranscriberApp(QWidget):
         logger.info("Started Promptify worker")
 
     def display_transcription(self, text):
+        if self._is_shutting_down():
+            logger.info("Skipping transcription display update during shutdown.")
+            return
         self.transcription_box.setPlainText(text)
         self.current_transcription = text
         self.progress_bar.setValue(50)
@@ -2649,6 +3086,9 @@ class AudioTranscriberApp(QWidget):
             self.update_quality_display(audio_analysis.quality)
 
     def display_refined_text(self, text):
+        if self._is_shutting_down():
+            logger.info("Skipping refined-text display update during shutdown.")
+            return
         self.refined_box.setPlainText(text)
         self.progress_bar.setValue(100)
         self.set_button_style("ready")
@@ -2724,12 +3164,18 @@ class AudioTranscriberApp(QWidget):
 
     def handle_error(self, error_message):
         logger.error(error_message)
+        if self._is_shutting_down():
+            return
         QMessageBox.critical(self, "Error", error_message)
         self.set_button_style("ready")
         self.progress_bar.setValue(0)
 
     def on_sensitivity_changed(self, text):
         """Handle sensitivity level changes with updated descriptions."""
+        if self._is_shutting_down():
+            logger.info("Ignoring sensitivity change during shutdown.")
+            return
+
         level_map = {
             "Original": SensitivityLevel.ORIGINAL,
             "Balanced": SensitivityLevel.BALANCED,
@@ -2765,23 +3211,49 @@ class AudioTranscriberApp(QWidget):
 
         QMessageBox.information(self, "Sensitivity Changed", info_text)
 
+    def _graceful_shutdown(self, reason: str, timeout_ms: int = SHUTDOWN_TIMEOUT_MS) -> bool:
+        with self._shutdown_lock:
+            if self._shutdown_completed:
+                logger.info(f"shutdown_already_completed reason={reason} original_reason={self._shutdown_reason}")
+                return True
+
+        first_entry = self._mark_shutdown_started(reason)
+        if first_entry:
+            logger.info(f"shutdown_started reason={reason}")
+        else:
+            logger.info(f"shutdown_already_started reason={reason} original_reason={self._shutdown_reason}")
+
+        self._set_shutdown_ui_state()
+        self.state.is_recording = False
+
+        cancelled_workers = self._cancel_all_workers()
+        remaining_budget_ms = max(0, int(timeout_ms))
+        worker_wait_ms = min(SHUTDOWN_WORKER_WAIT_MS, remaining_budget_ms)
+        remaining_budget_ms = max(0, remaining_budget_ms - worker_wait_ms)
+        recording_wait_ms = min(SHUTDOWN_RECORDING_WAIT_MS, remaining_budget_ms)
+
+        wait_report = self._wait_for_workers(worker_wait_ms)
+        recording_joined = self._wait_for_recording_thread(recording_wait_ms)
+
+        self._terminate_pyaudio_singleton()
+
+        try:
+            self._release_model_resources(timeout_sec=SHUTDOWN_OLLAMA_TIMEOUT_SEC)
+        except Exception as e:
+            logger.warning(f"Model resource release failed during shutdown: {e}")
+
+        self._cleanup_shutdown_hooks()
+        self._mark_shutdown_completed()
+        logger.info(
+            "shutdown_completed "
+            f"reason={reason} cancelled_workers={cancelled_workers} "
+            f"waited_workers={wait_report.get('waited', 0)} worker_timeouts={wait_report.get('timed_out', 0)} "
+            f"recording_joined={recording_joined} timeout_ms={timeout_ms}"
+        )
+        return True
+
     def closeEvent(self, event):
-        if self.state.has_active_threads:
-            logger.info("Waiting for active threads to finish...")
-            if self.current_worker and hasattr(self.current_worker, 'cancel'):
-                self.current_worker.cancel()
-            wait_time = 0
-            while self.state.has_active_threads and wait_time < 3000:
-                QApplication.processEvents()
-                wait_time += 100
-
-        if AudioRecorder._pyaudio_instance:
-            try:
-                AudioRecorder._pyaudio_instance.terminate()
-                logger.info("PyAudio singleton terminated")
-            except Exception:
-                pass
-
+        self._graceful_shutdown(reason="closeEvent", timeout_ms=SHUTDOWN_TIMEOUT_MS)
         event.accept()
 
 
@@ -2790,9 +3262,10 @@ class AudioTranscriberApp(QWidget):
 # --------------------------
 def main() -> None:
     """Main entry point for the Enhanced Hybrid Audio Transcriber."""
-    app = QApplication(sys.argv)
+    global _APP
+    _APP = QApplication(sys.argv)
     window = AudioTranscriberApp()
-    sys.exit(app.exec_())
+    sys.exit(_APP.exec_())
 
 
 if __name__ == '__main__':
