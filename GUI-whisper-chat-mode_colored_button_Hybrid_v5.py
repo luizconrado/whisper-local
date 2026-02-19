@@ -71,7 +71,7 @@ import weakref
 from dataclasses import dataclass
 from functools import partial, wraps
 from contextlib import contextmanager
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Set, Callable
 from enum import Enum
 from contextvars import ContextVar
 
@@ -81,7 +81,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QTextEdit, QProgressBar, QComboBox, QMessageBox, QLabel,
     QProgressDialog, QToolButton, QMenu, QAction, QSizePolicy
 )
-from PyQt5.QtCore import pyqtSignal, QThread, QObject, Qt, QSocketNotifier
+from PyQt5.QtCore import pyqtSignal, QThread, QObject, Qt, QSocketNotifier, QTimer
 
 import mlx_whisper
 import ollama
@@ -242,6 +242,8 @@ SHUTDOWN_OLLAMA_TIMEOUT_SEC = 1.5
 
 _OLLAMA_MODEL_USAGE_LOCK = threading.Lock()
 _OLLAMA_MODELS_USED: set = set()
+_OLLAMA_ACTIVE_CLIENTS_LOCK = threading.Lock()
+_OLLAMA_ACTIVE_CLIENTS: Dict[str, Any] = {}
 _APP: Optional[QApplication] = None
 
 
@@ -259,8 +261,41 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int, min_value: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        if value < min_value:
+            raise ValueError(f"must be >= {min_value}")
+        return value
+    except Exception:
+        logger.warning(f"Invalid int value for {name}={raw!r}; using default {default}.")
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Bound Ollama calls so shutdown can rely on cooperative cancellation + finite network waits.
 OLLAMA_REQUEST_TIMEOUT_SEC = _env_float("OLLAMA_REQUEST_TIMEOUT_SEC", 90.0)
+# Keep model loaded between requests to reduce cold-start latency.
+OLLAMA_KEEP_ALIVE = (os.getenv("OLLAMA_KEEP_ALIVE", "20m") or "20m").strip() or "20m"
+OLLAMA_WARMUP_ENABLED = _env_bool("OLLAMA_WARMUP_ENABLED", True)
+OLLAMA_WARMUP_NUM_CTX = _env_int("OLLAMA_WARMUP_NUM_CTX", 2048, min_value=256)
+OLLAMA_WARMUP_NUM_PREDICT = _env_int("OLLAMA_WARMUP_NUM_PREDICT", 8, min_value=1)
+OLLAMA_MODEL_SWITCH_WARMUP_ENABLED = _env_bool("OLLAMA_MODEL_SWITCH_WARMUP_ENABLED", True)
+OLLAMA_MODEL_SWITCH_UNLOAD_OTHERS = _env_bool("OLLAMA_MODEL_SWITCH_UNLOAD_OTHERS", True)
+OLLAMA_MODEL_SWITCH_DEFER_WHEN_BUSY = _env_bool("OLLAMA_MODEL_SWITCH_DEFER_WHEN_BUSY", True)
+OLLAMA_MODEL_SWITCH_TIMEOUT_SEC = _env_float("OLLAMA_MODEL_SWITCH_TIMEOUT_SEC", 8.0)
+OLLAMA_MODEL_SWITCH_KEEP_ALIVE = (
+    os.getenv("OLLAMA_MODEL_SWITCH_KEEP_ALIVE", OLLAMA_KEEP_ALIVE) or OLLAMA_KEEP_ALIVE
+).strip() or OLLAMA_KEEP_ALIVE
 
 
 def _track_ollama_model_usage(model_name: Optional[str]) -> None:
@@ -298,6 +333,127 @@ def _ollama_chat_with_timeout(*, timeout_sec: float = OLLAMA_REQUEST_TIMEOUT_SEC
     return client.chat(**chat_kwargs)
 
 
+class OllamaRequestCancelled(Exception):
+    """Raised when an in-flight Ollama request is cancelled locally."""
+
+
+def _register_active_ollama_client(owner_id: Optional[str], client: Any) -> None:
+    if not owner_id:
+        return
+    with _OLLAMA_ACTIVE_CLIENTS_LOCK:
+        _OLLAMA_ACTIVE_CLIENTS[owner_id] = client
+
+
+def _clear_active_ollama_client(owner_id: Optional[str], expected_client: Any = None) -> None:
+    if not owner_id:
+        return
+    with _OLLAMA_ACTIVE_CLIENTS_LOCK:
+        current = _OLLAMA_ACTIVE_CLIENTS.get(owner_id)
+        if current is None:
+            return
+        if expected_client is not None and current is not expected_client:
+            return
+        _OLLAMA_ACTIVE_CLIENTS.pop(owner_id, None)
+
+
+def _abort_active_ollama_client(owner_id: Optional[str]) -> bool:
+    if not owner_id:
+        return False
+    with _OLLAMA_ACTIVE_CLIENTS_LOCK:
+        client = _OLLAMA_ACTIVE_CLIENTS.pop(owner_id, None)
+    if client is None:
+        return False
+    try:
+        client.close()
+    except Exception as e:
+        logger.debug(f"Could not close active Ollama client for owner '{owner_id}': {e}")
+    return True
+
+
+def _abort_all_active_ollama_clients() -> int:
+    """
+    Best-effort abort for every tracked in-flight Ollama client.
+    Used as a shutdown hardening sweep for orphaned requests.
+    """
+    with _OLLAMA_ACTIVE_CLIENTS_LOCK:
+        active_items = list(_OLLAMA_ACTIVE_CLIENTS.items())
+        _OLLAMA_ACTIVE_CLIENTS.clear()
+
+    aborted = 0
+    for owner_id, client in active_items:
+        try:
+            client.close()
+            aborted += 1
+        except Exception as e:
+            logger.debug(f"Could not close active Ollama client for owner '{owner_id}': {e}")
+    return aborted
+
+
+def _extract_ollama_message_field(message: Any, field: str) -> str:
+    if message is None:
+        return ""
+    if isinstance(message, dict):
+        value = message.get(field)
+    else:
+        value = getattr(message, field, None)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _ollama_chat_stream_collect(
+        *,
+        owner_id: Optional[str],
+        should_cancel: Optional[Callable[[], bool]],
+        timeout_sec: float = OLLAMA_REQUEST_TIMEOUT_SEC,
+        **chat_kwargs
+) -> Dict[str, str]:
+    """
+    Stream chat chunks and allow cooperative, in-flight abort by closing the active client.
+    """
+    client = _new_ollama_client(timeout_sec=timeout_sec)
+    _register_active_ollama_client(owner_id, client)
+    content_parts: List[str] = []
+    thinking_parts: List[str] = []
+
+    stream_kwargs = dict(chat_kwargs)
+    stream_kwargs["stream"] = True
+
+    try:
+        stream = client.chat(**stream_kwargs)
+        for chunk in stream:
+            if should_cancel and should_cancel():
+                raise OllamaRequestCancelled("cancelled")
+
+            if isinstance(chunk, dict):
+                message = chunk.get("message")
+            else:
+                message = getattr(chunk, "message", None)
+
+            content_piece = _extract_ollama_message_field(message, "content")
+            if content_piece:
+                content_parts.append(content_piece)
+
+            thinking_piece = _extract_ollama_message_field(message, "thinking")
+            if thinking_piece:
+                thinking_parts.append(thinking_piece)
+
+        return {
+            "content": "".join(content_parts),
+            "thinking": "".join(thinking_parts),
+        }
+    except Exception as e:
+        if should_cancel and should_cancel():
+            raise OllamaRequestCancelled("cancelled") from e
+        raise
+    finally:
+        _clear_active_ollama_client(owner_id, expected_client=client)
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 def _list_ollama_models(timeout_sec: float = OLLAMA_REQUEST_TIMEOUT_SEC):
     client = _new_ollama_client(timeout_sec=timeout_sec)
     return client.list()
@@ -332,10 +488,14 @@ def _request_ollama_model_unload(model_name: str, timeout_sec: float = SHUTDOWN_
     Best-effort model unload request.
     Ollama supports unloading by issuing generate/chat with keep_alive=0.
     """
+    normalized = (model_name or "").strip()
+    if not normalized:
+        return False
+
     try:
         client = _new_ollama_client(timeout_sec=timeout_sec)
         client.generate(
-            model=model_name,
+            model=normalized,
             prompt="",
             stream=False,
             keep_alive=0,
@@ -344,10 +504,53 @@ def _request_ollama_model_unload(model_name: str, timeout_sec: float = SHUTDOWN_
                 "num_predict": 1
             },
         )
-        logger.info(f"Requested Ollama unload for model '{model_name}'")
+        logger.info(f"Requested Ollama unload for model '{normalized}'")
         return True
     except Exception as e:
-        logger.warning(f"Ollama unload request failed for '{model_name}': {e}")
+        logger.warning(f"Ollama unload request failed for '{normalized}': {e}")
+    return False
+
+
+def _request_ollama_model_warmup(
+        model_name: str,
+        *,
+        keep_alive: str = OLLAMA_MODEL_SWITCH_KEEP_ALIVE,
+        timeout_sec: float = OLLAMA_MODEL_SWITCH_TIMEOUT_SEC
+) -> bool:
+    """
+    Best-effort model warmup request.
+    Uses a tiny bounded generate call so the model is loaded and retained.
+    """
+    normalized = (model_name or "").strip()
+    if not normalized:
+        return False
+
+    if not OLLAMA_WARMUP_ENABLED:
+        logger.info("Ollama warmup skipped because OLLAMA_WARMUP_ENABLED=false")
+        return False
+
+    try:
+        client = _new_ollama_client(timeout_sec=timeout_sec)
+        client.generate(
+            model=normalized,
+            prompt="warmup",
+            stream=False,
+            keep_alive=keep_alive,
+            options={
+                "num_ctx": OLLAMA_WARMUP_NUM_CTX,
+                "temperature": 0.0,
+                "seed": 1,
+                "num_predict": OLLAMA_WARMUP_NUM_PREDICT,
+            },
+        )
+        _track_ollama_model_usage(normalized)
+        logger.info(
+            "Requested Ollama warmup "
+            f"model='{normalized}' keep_alive={keep_alive} num_ctx={OLLAMA_WARMUP_NUM_CTX}"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Ollama warmup request failed for '{normalized}': {e}")
     return False
 
 
@@ -1742,6 +1945,8 @@ class TranscriptionThread(QThread):
         with self._cancel_lock:
             self._is_cancelled = True
             logger.info(f"Cancellation requested for thread {self._thread_id}")
+        if _abort_active_ollama_client(self._thread_id):
+            logger.info(f"Cancelled active Ollama stream for thread {self._thread_id}")
 
     def is_cancelled(self):
         """Check if cancellation was requested."""
@@ -2065,22 +2270,28 @@ class TranscriptionThread(QThread):
             chat_kwargs = {
                 'model': self.model_name,
                 'messages': messages,
+                'keep_alive': OLLAMA_KEEP_ALIVE,
                 'options': {'num_ctx': config.ctx_num, 'temperature': config.temperature, 'seed': config.seed}
             }
             if config.think is not None:
                 chat_kwargs['think'] = config.think
 
             _track_ollama_model_usage(self.model_name)
-            response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
+            stream_payload = _ollama_chat_stream_collect(
+                owner_id=self._thread_id,
+                should_cancel=self.is_cancelled,
+                timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC,
+                **chat_kwargs
+            )
 
             # When think=True, Ollama routes reasoning to message.thinking and
             # delivers only the final answer in message.content (no <think> tags).
             # Log the thinking trace for debugging if present.
-            thinking_trace = getattr(response.message, 'thinking', None)
+            thinking_trace = stream_payload.get('thinking', '')
             if thinking_trace:
                 logger.debug(f"Model thinking trace ({self.model_name}): {thinking_trace[:200]}...")
 
-            raw_content = response.message.content or ''
+            raw_content = stream_payload.get('content', '')
 
             # Fallback: strip <think> tags only for models that don't use think= param
             # (e.g. DeepSeek-R1 with think=None may still emit tags inside content)
@@ -2092,6 +2303,9 @@ class TranscriptionThread(QThread):
             logger.info("Completed single-step text refinement")
             return result
 
+        except OllamaRequestCancelled:
+            logger.info(f"Text refinement cancelled in thread {self._thread_id}")
+            return "Refinement cancelled."
         except Exception as e:
             logger.error(f"Text refinement failed: {e}")
             return f"Refinement failed: {str(e)}"
@@ -2114,14 +2328,20 @@ class TranscriptionThread(QThread):
             chat_kwargs = {
                 'model': self.model_name,
                 'messages': messages,
+                'keep_alive': OLLAMA_KEEP_ALIVE,
                 'options': {'num_ctx': effective_ctx, 'temperature': promptify_config.temperature, 'seed': promptify_config.seed}
             }
             if model_config.think is not None:
                 chat_kwargs['think'] = model_config.think
 
             _track_ollama_model_usage(self.model_name)
-            response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
-            raw_content = response.message.content or ''
+            stream_payload = _ollama_chat_stream_collect(
+                owner_id=self._thread_id,
+                should_cancel=self.is_cancelled,
+                timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC,
+                **chat_kwargs
+            )
+            raw_content = stream_payload.get('content', '')
             if model_config.think is None:
                 raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
 
@@ -2133,6 +2353,9 @@ class TranscriptionThread(QThread):
 
             logger.info("Completed Promptify generation from transcription flow")
             return result
+        except OllamaRequestCancelled:
+            logger.info(f"Promptify cancelled in thread {self._thread_id}")
+            return "Promptify cancelled."
         except Exception as e:
             logger.error(f"Promptify failed during transcription flow: {e}")
             return f"Promptify failed: {str(e)}"
@@ -2159,6 +2382,8 @@ class RefinementThread(QThread):
         with self._cancel_lock:
             self._is_cancelled = True
             logger.info(f"Cancellation requested for refinement thread {self._thread_id}")
+        if _abort_active_ollama_client(self._thread_id):
+            logger.info(f"Cancelled active Ollama stream for refinement thread {self._thread_id}")
 
     def is_cancelled(self):
         with self._cancel_lock:
@@ -2211,22 +2436,28 @@ class RefinementThread(QThread):
             chat_kwargs = {
                 'model': self.model_name,
                 'messages': messages,
+                'keep_alive': OLLAMA_KEEP_ALIVE,
                 'options': {'num_ctx': config.ctx_num, 'temperature': config.temperature, 'seed': config.seed}
             }
             if config.think is not None:
                 chat_kwargs['think'] = config.think
 
             _track_ollama_model_usage(self.model_name)
-            response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
+            stream_payload = _ollama_chat_stream_collect(
+                owner_id=self._thread_id,
+                should_cancel=self.is_cancelled,
+                timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC,
+                **chat_kwargs
+            )
 
             # When think=True, Ollama routes reasoning to message.thinking and
             # delivers only the final answer in message.content (no <think> tags).
             # Log the thinking trace for debugging if present.
-            thinking_trace = getattr(response.message, 'thinking', None)
+            thinking_trace = stream_payload.get('thinking', '')
             if thinking_trace:
                 logger.debug(f"Model thinking trace ({self.model_name}): {thinking_trace[:200]}...")
 
-            raw_content = response.message.content or ''
+            raw_content = stream_payload.get('content', '')
 
             # Fallback: strip <think> tags only for models that don't use think= param
             # (e.g. DeepSeek-R1 with think=None may still emit tags inside content)
@@ -2238,6 +2469,9 @@ class RefinementThread(QThread):
             logger.info("Completed single-step text refinement")
             return result
 
+        except OllamaRequestCancelled:
+            logger.info(f"Refinement cancelled in thread {self._thread_id}")
+            return "Refinement cancelled."
         except Exception as e:
             logger.error(f"Text refinement failed: {e}")
             return f"Refinement failed: {str(e)}"
@@ -2264,6 +2498,8 @@ class PromptifyThread(QThread):
         with self._cancel_lock:
             self._is_cancelled = True
             logger.info(f"Cancellation requested for promptify thread {self._thread_id}")
+        if _abort_active_ollama_client(self._thread_id):
+            logger.info(f"Cancelled active Ollama stream for promptify thread {self._thread_id}")
 
     def is_cancelled(self):
         with self._cancel_lock:
@@ -2302,14 +2538,20 @@ class PromptifyThread(QThread):
             chat_kwargs = {
                 'model': self.model_name,
                 'messages': messages,
+                'keep_alive': OLLAMA_KEEP_ALIVE,
                 'options': {'num_ctx': effective_ctx, 'temperature': promptify_config.temperature, 'seed': promptify_config.seed}
             }
             if model_config.think is not None:
                 chat_kwargs['think'] = model_config.think
 
             _track_ollama_model_usage(self.model_name)
-            response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
-            raw_content = response.message.content or ''
+            stream_payload = _ollama_chat_stream_collect(
+                owner_id=self._thread_id,
+                should_cancel=self.is_cancelled,
+                timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC,
+                **chat_kwargs
+            )
+            raw_content = stream_payload.get('content', '')
             if model_config.think is None:
                 raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
 
@@ -2321,9 +2563,102 @@ class PromptifyThread(QThread):
 
             logger.info("Completed Promptify generation")
             return result
+        except OllamaRequestCancelled:
+            logger.info(f"Promptify cancelled in thread {self._thread_id}")
+            return "Promptify cancelled."
         except Exception as e:
             logger.error(f"Promptify failed: {e}")
             return f"Promptify failed: {str(e)}"
+
+
+# --------------------------
+# Ollama Model Transition Thread
+# --------------------------
+class OllamaModelTransitionThread(QThread):
+    """Warm the selected model and offload non-selected models in one bounded background run."""
+    transition_finished = pyqtSignal(int, str, dict)
+
+    def __init__(
+            self,
+            sequence_id: int,
+            target_model: str,
+            unload_candidates: List[str],
+            known_models: Optional[List[str]] = None,
+            *,
+            warmup_enabled: bool = True,
+            unload_enabled: bool = True,
+            timeout_sec: float = OLLAMA_MODEL_SWITCH_TIMEOUT_SEC,
+            keep_alive: str = OLLAMA_MODEL_SWITCH_KEEP_ALIVE
+    ) -> None:
+        super().__init__()
+        self.sequence_id = sequence_id
+        self.target_model = (target_model or "").strip()
+        self.unload_candidates = [str(item).strip() for item in unload_candidates if str(item).strip()]
+        self.known_models = {str(item).strip() for item in (known_models or []) if str(item).strip()}
+        self.warmup_enabled = bool(warmup_enabled)
+        self.unload_enabled = bool(unload_enabled)
+        self.timeout_sec = max(0.1, float(timeout_sec))
+        self.keep_alive = (keep_alive or OLLAMA_KEEP_ALIVE).strip() or OLLAMA_KEEP_ALIVE
+        self._cancelled = False
+        self._cancel_lock = threading.Lock()
+        self._thread_id = f"model_transition_{self.sequence_id}_{int(time.time() * 1000)}"
+
+    def cancel(self) -> None:
+        with self._cancel_lock:
+            self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        with self._cancel_lock:
+            return self._cancelled
+
+    def run(self) -> None:
+        report: Dict[str, Any] = {
+            "warmed": False,
+            "unloaded": [],
+            "failed_unloads": [],
+            "cancelled": False,
+            "warmup_attempted": False,
+            "warmup_model": self.target_model,
+        }
+
+        if self.is_cancelled():
+            report["cancelled"] = True
+            self.transition_finished.emit(self.sequence_id, self.target_model, report)
+            return
+
+        if self.warmup_enabled and self.target_model:
+            report["warmup_attempted"] = True
+            report["warmed"] = _request_ollama_model_warmup(
+                self.target_model,
+                keep_alive=self.keep_alive,
+                timeout_sec=self.timeout_sec
+            )
+
+        if self.unload_enabled:
+            running_models = set(_query_ollama_running_models(timeout_sec=self.timeout_sec))
+            for running_model in sorted(running_models):
+                normalized = str(running_model).strip()
+                if not normalized or normalized == self.target_model:
+                    continue
+                if self.known_models and normalized not in self.known_models:
+                    continue
+                if normalized not in self.unload_candidates:
+                    self.unload_candidates.append(normalized)
+
+            for model_name in self.unload_candidates:
+                if self.is_cancelled():
+                    report["cancelled"] = True
+                    break
+                unloaded = _request_ollama_model_unload(
+                    model_name,
+                    timeout_sec=self.timeout_sec
+                )
+                if unloaded:
+                    report["unloaded"].append(model_name)
+                else:
+                    report["failed_unloads"].append(model_name)
+
+        self.transition_finished.emit(self.sequence_id, self.target_model, report)
 
 
 # --------------------------
@@ -2355,13 +2690,35 @@ class AudioTranscriberApp(QWidget):
         self._shutdown_completed = False
         self._shutdown_reason = ""
         self._signal_bridge: Optional[UnixSignalBridge] = None
+        self._model_selector_ready = False
+        self._selected_model_name = ""
+        self._model_transition_lock = threading.Lock()
+        self._model_transition_sequence = 0
+        self._pending_model_target: Optional[str] = None
+        self._pending_unload_models: Set[str] = set()
+        self._model_transition_worker: Optional[OllamaModelTransitionThread] = None
+        self._model_transition_timer: Optional[QTimer] = None
 
         self._transcription_ready.connect(self._handle_transcription_ready)
         self._recording_failed.connect(self._handle_recording_failed)
 
         self.init_ui()
         self._setup_shutdown_hooks()
+        self._setup_model_transition_timer()
         threading.Thread(target=TranscriberWarmup.warm, daemon=True).start()
+
+    def _setup_model_transition_timer(self) -> None:
+        self._model_transition_timer = QTimer(self)
+        self._model_transition_timer.setInterval(750)
+        self._model_transition_timer.timeout.connect(self._flush_pending_model_transition_if_idle)
+        self._model_transition_timer.start()
+
+    def _ensure_model_transition_timer_running(self) -> None:
+        if self._model_transition_timer is None:
+            self._setup_model_transition_timer()
+            return
+        if not self._model_transition_timer.isActive():
+            self._model_transition_timer.start()
 
     def _setup_shutdown_hooks(self) -> None:
         app = QApplication.instance()
@@ -2428,6 +2785,183 @@ class AudioTranscriberApp(QWidget):
             workers.append(self.current_worker)
         return workers
 
+    def _is_runtime_busy(self) -> bool:
+        return self.state.is_recording or self.state.has_active_threads
+
+    def _snapshot_inflight_worker_models(self) -> Set[str]:
+        in_flight: Set[str] = set()
+        for worker in self._snapshot_workers():
+            try:
+                if not worker.isRunning():
+                    continue
+            except Exception:
+                continue
+
+            model_name = getattr(worker, "model_name", None)
+            if model_name:
+                in_flight.add(str(model_name))
+        return in_flight
+
+    def _has_pending_model_transition(self) -> bool:
+        with self._model_transition_lock:
+            return bool(self._pending_model_target) or bool(self._pending_unload_models)
+
+    def _queue_model_transition(self, target_model: str, previous_model: Optional[str]) -> int:
+        normalized_target = (target_model or "").strip()
+        normalized_previous = (previous_model or "").strip()
+        with self._model_transition_lock:
+            self._model_transition_sequence += 1
+            seq = self._model_transition_sequence
+            self._pending_model_target = normalized_target
+            if normalized_previous and normalized_previous != normalized_target:
+                self._pending_unload_models.add(normalized_previous)
+            return seq
+
+    def _collect_unload_candidates(self, target_model: str) -> List[str]:
+        target = (target_model or "").strip()
+        tracked_models = set(_snapshot_tracked_ollama_models())
+        with self._model_transition_lock:
+            pending_models = set(self._pending_unload_models)
+        candidates = tracked_models | pending_models
+        if target:
+            candidates.discard(target)
+        candidates -= self._snapshot_inflight_worker_models()
+        return sorted(name for name in candidates if name)
+
+    def on_model_selector_changed(self, model_name: str) -> None:
+        if self._is_shutting_down():
+            logger.info("Ignoring model change during shutdown.")
+            return
+        if not self._model_selector_ready:
+            return
+
+        selected = (model_name or "").strip()
+        if not selected:
+            return
+
+        previous = (self._selected_model_name or "").strip()
+        if selected == previous:
+            return
+
+        self._selected_model_name = selected
+        sequence_id = self._queue_model_transition(selected, previous)
+        logger.info(
+            "model_transition_queued "
+            f"seq={sequence_id} selected='{selected}' previous='{previous or '-'}'"
+        )
+
+        if OLLAMA_MODEL_SWITCH_DEFER_WHEN_BUSY and self._is_runtime_busy():
+            logger.info(f"model_transition_deferred seq={sequence_id} reason=runtime_busy")
+            return
+
+        self._start_pending_model_transition(reason="model_selector_changed")
+
+    def _start_pending_model_transition(self, reason: str) -> None:
+        if self._is_shutting_down():
+            return
+
+        if OLLAMA_MODEL_SWITCH_DEFER_WHEN_BUSY and self._is_runtime_busy():
+            logger.info(f"model_transition_deferred reason={reason} runtime_busy=true")
+            return
+
+        worker = self._model_transition_worker
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    worker.cancel()
+                    logger.info(f"model_transition_cancel_requested reason={reason}")
+                    return
+            except Exception:
+                pass
+
+        with self._model_transition_lock:
+            pending_target = (self._pending_model_target or "").strip()
+            sequence_id = self._model_transition_sequence
+            pending_unloads = set(self._pending_unload_models)
+            self._pending_model_target = None
+            self._pending_unload_models.clear()
+
+        target_model = pending_target or (self._selected_model_name or "").strip()
+        if not target_model and not pending_unloads:
+            return
+
+        unload_candidates = self._collect_unload_candidates(target_model)
+        unload_candidates.extend(
+            sorted(name for name in pending_unloads if name and name not in unload_candidates and name != target_model)
+        )
+        unload_candidates = sorted(set(unload_candidates))
+
+        transition_worker = OllamaModelTransitionThread(
+            sequence_id=sequence_id,
+            target_model=target_model,
+            unload_candidates=unload_candidates,
+            known_models=list(self.available_models),
+            warmup_enabled=OLLAMA_MODEL_SWITCH_WARMUP_ENABLED and bool(target_model),
+            unload_enabled=OLLAMA_MODEL_SWITCH_UNLOAD_OTHERS,
+            timeout_sec=OLLAMA_MODEL_SWITCH_TIMEOUT_SEC,
+            keep_alive=OLLAMA_MODEL_SWITCH_KEEP_ALIVE,
+        )
+        transition_worker.transition_finished.connect(self._on_model_transition_finished)
+        transition_worker.finished.connect(self._on_model_transition_worker_finished)
+        self._track_worker(transition_worker)
+        self._model_transition_worker = transition_worker
+        logger.info(
+            "model_transition_started "
+            f"seq={sequence_id} reason={reason} target='{target_model}' "
+            f"unload_candidates={unload_candidates}"
+        )
+        transition_worker.start()
+
+    def _on_model_transition_finished(self, sequence_id: int, target_model: str, report: Dict[str, Any]) -> None:
+        try:
+            latest = self._model_transition_sequence
+            stale = sequence_id < latest
+            logger.info(
+                "model_transition_finished "
+                f"seq={sequence_id} latest_seq={latest} stale={stale} target='{target_model}' "
+                f"warmed={report.get('warmed')} warmup_attempted={report.get('warmup_attempted')} "
+                f"unloaded={report.get('unloaded')} failed_unloads={report.get('failed_unloads')} "
+                f"cancelled={report.get('cancelled')}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log model transition result: {e}")
+
+    def _on_model_transition_worker_finished(self) -> None:
+        sender = self.sender()
+        if sender is self._model_transition_worker:
+            self._model_transition_worker = None
+        self._flush_pending_model_transition_if_idle()
+
+    def _flush_pending_model_transition_if_idle(self) -> None:
+        if self._is_shutting_down():
+            return
+        if not self._has_pending_model_transition():
+            return
+        if OLLAMA_MODEL_SWITCH_DEFER_WHEN_BUSY and self._is_runtime_busy():
+            return
+        self._start_pending_model_transition(reason="idle_flush")
+
+    def _cancel_model_transition_background(self) -> None:
+        if self._model_transition_timer is not None:
+            try:
+                self._model_transition_timer.stop()
+            except Exception:
+                pass
+
+        with self._model_transition_lock:
+            self._pending_model_target = None
+            self._pending_unload_models.clear()
+
+        worker = self._model_transition_worker
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.cancel()
+                logger.info("model_transition_cancel_requested reason=shutdown")
+        except Exception as e:
+            logger.debug(f"Could not cancel model transition worker during shutdown: {e}")
+
     def _set_shutdown_ui_state(self) -> None:
         self._set_action_buttons_enabled(False)
         if hasattr(self, 'recording_button'):
@@ -2440,6 +2974,7 @@ class AudioTranscriberApp(QWidget):
             self.sensitivity_selector.setEnabled(False)
 
     def _restore_ui_after_shutdown_abort(self) -> None:
+        self._ensure_model_transition_timer_running()
         if hasattr(self, 'recording_button'):
             self.recording_button.setEnabled(True)
         if hasattr(self, 'model_selector'):
@@ -2590,6 +3125,7 @@ class AudioTranscriberApp(QWidget):
             return
         self.display_transcription("No audio data captured.")
         self.display_refined_text("")
+        self._flush_pending_model_transition_if_idle()
 
     def _disconnect_worker_signals(self):
         for connection in self._worker_connections:
@@ -2726,6 +3262,9 @@ class AudioTranscriberApp(QWidget):
             }
             QComboBox::drop-down { width: 20px; }
         """)
+        self._selected_model_name = (self.model_selector.currentText() or "").strip()
+        self.model_selector.currentTextChanged.connect(self.on_model_selector_changed)
+        self._model_selector_ready = True
         top_layout.addWidget(self.model_selector, 30)
 
         self.text_action_button = QToolButton(self)
@@ -3164,6 +3703,7 @@ class AudioTranscriberApp(QWidget):
         self.refined_box.setPlainText(text)
         self.progress_bar.setValue(100)
         self.set_button_style("ready")
+        self._flush_pending_model_transition_if_idle()
 
     def copy_text(self, widget):
         clipboard = QApplication.clipboard()
@@ -3241,6 +3781,7 @@ class AudioTranscriberApp(QWidget):
         QMessageBox.critical(self, "Error", error_message)
         self.set_button_style("ready")
         self.progress_bar.setValue(0)
+        self._flush_pending_model_transition_if_idle()
 
     def on_sensitivity_changed(self, text):
         """Handle sensitivity level changes with updated descriptions."""
@@ -3306,6 +3847,10 @@ class AudioTranscriberApp(QWidget):
 
         self._set_shutdown_ui_state()
         self.state.is_recording = False
+        self._cancel_model_transition_background()
+        pre_worker_aborts = _abort_all_active_ollama_clients()
+        if pre_worker_aborts > 0:
+            logger.info(f"shutdown_preworker_ollama_aborts count={pre_worker_aborts}")
 
         cancelled_workers = self._cancel_all_workers()
         remaining_budget_ms = max(0, int(timeout_ms))
