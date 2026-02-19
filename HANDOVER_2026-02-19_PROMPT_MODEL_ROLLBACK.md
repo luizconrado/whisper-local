@@ -138,12 +138,12 @@ Use this map to find exactly what you need:
 ## 0) Current Canonical State (Last Verified Checkpoint)
 
 - Branch: `main`
-- Current HEAD: `ff704c1`
+- Current HEAD: `b626ce3`
 - Current upstream: `origin/main`
 - Rollback anchor commit (runtime baseline): `6a61314`
 - Working-tree state at checkpoint time: clean
 - Stash entries: `stash@{0}` exists with model/performance/shutdown experiments
-- Verification timestamp: `2026-02-19` (refresh before implementation work)
+- Verification timestamp: `2026-02-19` (refreshed after onboarding-only verification pass)
 
 Commands used to verify now:
 
@@ -159,7 +159,7 @@ git stash list
 Observed at checkpoint time:
 
 - `git status --short` -> _no output_ (clean tree)
-- `HEAD` -> `ff704c1`
+- `HEAD` -> `b626ce3`
 - rollback anchor -> `6a61314`
 - `stash@{0}` -> `On main: WIP model tuning + shutdown experiments backup`
 
@@ -200,6 +200,10 @@ These are the key commits the session referenced/produced:
    Message: `Expand handover with onboarding runbook and phase clarity`  
    Adds structured onboarding/navigation and richer reconstruction guidance.
 
+7. `b626ce3`  
+   Message: `Strengthen handover onboarding and phase reimplementation runbook`  
+   Latest documentation-only follow-up that preserves the same runtime baseline and open-phase status.
+
 No committed code from the runtime-tuning/shutdown experimental arc (Phases I onward) was retained; that arc remains in `stash@{0}` (`344b0fa`) and backup patch artifacts.
 
 ---
@@ -219,7 +223,7 @@ The work happened in three major waves:
 3. **Regression + rollback wave (stable recovery)**
 - User observed memory spikes and empty model outputs.
 - Decision made to revert to state right after prompt improvements and pre-performance tuning arc.
-- Local experiments preserved in stash and patch; core runtime baseline anchored at `6a61314`, followed by prompt/handover commits (`5947940`, `1a6e1b7`, `ff704c1`) that did not reintroduce Phase-I+ runtime tuning.
+- Local experiments preserved in stash and patch; core runtime baseline anchored at `6a61314`, followed by prompt/handover commits (`5947940`, `1a6e1b7`, `ff704c1`, `b626ce3`) that did not reintroduce Phase-I+ runtime tuning.
 
 ---
 
@@ -669,7 +673,7 @@ Recorded outcome:
 Context note:
 
 - `6a61314` is the **rollback/runtime anchor** used for stable-vs-experimental comparisons.
-- Current repository tip is newer (`ff704c1`) and includes post-rollback documentation/prompt commits.
+- Current repository tip is newer (`b626ce3`) and includes post-rollback documentation/prompt commits.
 
 ### Confirm current state and stash anchor
 
@@ -801,6 +805,19 @@ Expected: workers cancel/join within timeout; app exits.
 10. Verify no empty final outputs on normal cases  
 Expected: 0 empty responses in normal-path runs.
 
+Fixed baseline corpus profile (to reduce cross-run ambiguity):
+
+1. Short recordings (`5` clips, `10-25s` each), clear punctuation expectation.
+2. Medium recordings (`5` clips, `45-120s` each), mixed speaking pace.
+3. Long punctuated recordings (`5` clips, `3-6 min`), coherent paragraph-level speech.
+4. Long low-punctuation recordings (`3` clips, `3-6 min`), stream-of-consciousness style.
+5. Multilingual fragments (`2` clips, at least one containing Portuguese and one containing German terms).
+
+Execution note:
+
+1. Use the same corpus set before and after each phase increment.
+2. Record corpus IDs and run order in the evidence folder to keep memory-trend comparisons reproducible.
+
 Evidence capture minimum:
 
 1. Command outputs from Section `14` comparison/retrieval checks.
@@ -853,10 +870,11 @@ python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py > "$OUT_
 
 ## 9) Known Artifacts and Pointers
 
-- Current canonical HEAD commit: `ff704c1`
+- Current canonical HEAD commit: `b626ce3`
 - Handover base reconstruction commit: `1a6e1b7`
 - Post-rollback GLM prompt refinement commit: `5947940`
 - Handover onboarding/phase-clarity extension commit: `ff704c1`
+- Handover runbook-strengthening follow-up commit: `b626ce3`
 - Stable runtime anchor commit: `6a61314`
 - Promptify enhancement commit: `5bd8a65`
 - Pre-session foundational commit: `8f1a6e6`
@@ -891,7 +909,7 @@ Three reference snapshots used:
    Commit message: `Add Hybrid v5 transcriber with Ollama 0.6 API compatibility`  
    Line count snapshot: `2453`
 
-2. **Current active version**: `HEAD` = `ff704c1` (includes follow-up commits `5947940`, `1a6e1b7`, `ff704c1`)  
+2. **Current active version**: `HEAD` = `b626ce3` (includes follow-up commits `5947940`, `1a6e1b7`, `ff704c1`, `b626ce3`)  
    Line count now: `2799`
 
 3. **After all implementations (pre-rollback, regression period)**: `stash@{0}` (`344b0fa`)  
@@ -1061,6 +1079,27 @@ export OLLAMA_NUM_PREDICT_MAX_PROMPTIFY=4096
 ```
 
 After stable validation, tune upward intentionally and re-run Section `7`.
+
+#### 13.1.c Phase I/J Strict Scope Lock (avoid accidental bleed into M/O/Q/R/S)
+
+Include in Phase I/J only:
+
+1. `keep_alive` plumbing and conservative runtime env knobs.
+2. Non-fatal warmup path behavior (failure logs only; no flow interruption).
+3. Telemetry capture for per-call model timings and effective runtime options.
+
+Do not include in Phase I/J:
+
+1. Token-estimator/planner helpers (`_estimate_tokens_from_text`, `_estimate_tokens_from_messages`, `_desired_output_tokens`, `_plan_ollama_budget`).
+2. Token-budget split/chunk helpers (`_split_text_by_token_budget` and related chunk-plan logic).
+3. Context fallback retry wrapper (`_ollama_chat_with_ctx_fallback`).
+4. Optional tokenizer and cache-threshold hardening (`tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB` logic).
+5. Shutdown coordinator work (`aboutToQuit`, `_graceful_shutdown`, global cancel/join orchestration).
+
+Rationale:
+
+1. This keeps first-slice blast radius small and preserves clean phase boundaries.
+2. Missing-feature reintroduction remains ordered: `I/J` -> `M` -> `O/Q` -> `R/S`.
 
 ### 13.2 Adaptive Budgeting Core (Phase M) — Stash-only Functions
 
