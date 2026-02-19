@@ -17,8 +17,9 @@ Mission:
 Current implementation boundary:
 
 1. Already implemented and active: prompt engineering wave + selected post-process flow + GLM prompt-quality rewrite (see Section 12).
-2. Open/pending for reimplementation: Phases `I/J`, `M`, `O`, `Q` (and optional revisit of temporary Phase H 8k experiment).
-3. Implemented in committed `HEAD`: Phase `R/S` baseline (`e78f6d9`) plus shutdown hardening follow-up (`473de0a`); runtime-matrix confirmation remains pending in this environment.
+2. Open/pending for reimplementation: Phases `I/J`, `M`, `O`, `Q`.
+3. Phase `H` temporary 8k `glm` experiment is closed by owner decision (2026-02-19): keep `glm ctx_num=16384` in current and future baseline unless explicitly changed later.
+4. Implemented in committed `HEAD`: Phase `R/S` baseline (`e78f6d9`) plus shutdown hardening follow-up (`473de0a`); runtime-matrix confirmation remains pending in this environment.
 
 Three script versions every new agent must compare:
 
@@ -67,12 +68,13 @@ Implementation rules (strict):
 
 Open work checklist:
 
-1. `[ ]` Phase I/J runtime tuning pack
+1. `[ ]` Phase I/J runtime tuning pack (partial reintroduction active; planner/telemetry/fallback still open)
 2. `[ ]` Phase M adaptive budgeting stack
 3. `[ ]` Phase O hardening pack 1
 4. `[ ]` Phase Q hardening pack 2
-5. `[x]` Phase R/S graceful shutdown coordinator (`implemented in HEAD`; runtime matrix still pending)
-6. `[ ]` Optional: re-test temporary Phase H `glm ctx_num=8192` experiment
+5. `[x]` Phase R/S graceful shutdown coordinator (`implemented in HEAD`; partial runtime validation completed; full matrix still pending)
+6. `[x]` Phase H decision lock: keep `glm ctx_num=16384` (temporary 8k revisit closed by owner decision on 2026-02-19)
+7. `[x]` R/S hardening add-on: explicit in-flight Ollama stream abort (`cancel()` path) + pre-worker orphan abort sweep at shutdown start
 
 Runtime dependency baseline for onboarding:
 
@@ -976,7 +978,7 @@ Working-tree note after Phase `R/S` hardening follow-up commit:
 
 - Runtime file line count at `HEAD`: `3384`
 - Implementation state: hardening committed in `HEAD` (`473de0a`)
-- Runtime validation state: still pending due missing runtime dependencies in this environment
+- Runtime validation state: partial runtime checks now completed (Ollama stream interruption + unload contract); full GUI/audio matrix still pending
 
 ---
 
@@ -1005,19 +1007,19 @@ Important provenance note:
 | **Phases D/E/F** Auto post-transcription follows selected mode (`refine`/`promptify`) | Missing | Present | Present | Implemented | `post_process_mode` in `TranscriptionThread` and passed by UI worker creation. |
 | **8f1a6e6 foundation** UI action picker + Promptify flow + sensitivity callback deadlock fix | Missing | Present | Present | Implemented | `QToolButton` action picker and lock-safe callback notify path exist in current. |
 | **Phase G** GLM refine prompt iterative rewrite (quality gate version) | Missing | Present | Present | Implemented | Current GLM system prompt includes `Restructuring quality gate (internal decision)`. |
-| **Phase H** temporary `glm ctx_num=8192` experiment | Missing | Not active (`ctx_num=16384`) | Historically present during arc | Partial | Session did this temporarily; current code no longer keeps `glm` at 8k. |
-| **Phases I/J** runtime tuning pack (`keep_alive`, adaptive hooks, `num_predict` planning, telemetry/warmup expansion) | Missing | Missing | Present | Not Implemented (Current) | Stash-only symbols: `OLLAMA_KEEP_ALIVE`, `_plan_ollama_budget`, metrics logger, warmup calls. |
+| **Phase H** temporary `glm ctx_num=8192` experiment | Missing | Not active (`ctx_num=16384`) | Historically present during arc | Closed (Decision: keep `ctx_num=16384`) | Session tested this temporarily; owner decision (`2026-02-19`) closes revisit and keeps `glm` at `16384` as the baseline. |
+| **Phases I/J** runtime tuning pack (`keep_alive`, adaptive hooks, `num_predict` planning, telemetry/warmup expansion) | Missing | Partial (`keep_alive` + warmup/model-switch lifecycle + streaming abort hooks; planner/telemetry still missing) | Present | Partial / Open | Current includes `OLLAMA_KEEP_ALIVE`, warmup controls, and model-transition lifecycle. Still open: telemetry logger and planner/fallback helpers (`_plan_ollama_budget`, `_estimate_tokens*`, `_ollama_chat_with_ctx_fallback`). |
 | **Phase M** adaptive budgeting helper stack (`_estimate_tokens*`, `_plan_ollama_budget`, chunk fallback) | Missing | Missing | Present | Not Implemented (Current) | Stash-only function set; absent in current file. |
 | **Phase O** hardening pack 1 (context fallback retry, multilingual estimation, splitter improvements) | Missing | Missing | Present | Not Implemented (Current) | Stash-only helpers (`_ollama_chat_with_ctx_fallback`, multilingual token estimate). |
 | **Phase Q** hardening pack 2 (`tiktoken`, memory-threshold cache clear, richer diagnostics) | Missing | Missing | Present | Not Implemented (Current) | Stash-only imports/config: `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`. |
-| **Phases R/S** graceful shutdown coordinator (`aboutToQuit`, global cancel/wait/join, model unload flow) | Missing | Present | Present | Implemented (`HEAD`) + Validation Pending | Committed in `e78f6d9` with follow-up hardening in `473de0a` (`OLLAMA_REQUEST_TIMEOUT_SEC`, `_ollama_chat_with_timeout`, `set_wakeup_fd`, timeout-safe close policy). |
+| **Phases R/S** graceful shutdown coordinator (`aboutToQuit`, global cancel/wait/join, model unload flow) | Missing | Present | Present | Implemented (`HEAD`) + Partial Validation (Full Matrix Pending) | Baseline committed in `e78f6d9`; hardening in `473de0a`; current working tree adds explicit streamed-call abort path (`_abort_active_ollama_client`) plus shutdown pre-worker orphan sweep (`_abort_all_active_ollama_clients`). |
 | **Phase U** rollback and stabilization path | N/A | Reflected by preserved baseline and stash artifact flow | N/A | Implemented (historical action) | Handover rollback steps + stash/patch artifact preservation. |
 
-### Boundary Clarification: Phase H vs Phases I/J
+### Boundary Clarification: Phase H vs Phases I/J (Closed Decision Recorded)
 
 1. **Phase H scope** was limited to token-budget discussion plus temporary context experiments (including a temporary `glm` 8k setting during the arc).
 2. **Phase I begins** when runtime-tuning machinery appears (for example symbols such as `OLLAMA_KEEP_ALIVE`, `_plan_ollama_budget`, `_estimate_tokens_from_text`, `_ollama_chat_with_ctx_fallback`, telemetry fields, and dynamic `num_predict` planning).
-3. In current HEAD, `phi4` remains `ctx_num=8192` while `glm` is `ctx_num=16384`; therefore Phase H is marked `Partial` (historically applied, not currently active as temporary 8k `glm` behavior).
+3. In current HEAD, `phi4` remains `ctx_num=8192` while `glm` is `ctx_num=16384`; owner decision on `2026-02-19` closes Phase H re-test and locks `glm` baseline to `16384` unless explicitly reopened.
 
 ### Current "Already Implemented" Set (effective now)
 
@@ -1028,15 +1030,15 @@ Important provenance note:
 5. `8f1a6e6` foundation changes
 6. Phase G
 7. Phase U (historical rollback workflow and artifacting)
-8. Phases R/S (`implemented in HEAD`; runtime validation still pending in this environment)
+8. Phases R/S (`implemented in HEAD`; partial runtime validation complete; full matrix pending)
+9. Phase H closure decision: keep `glm ctx_num=16384` (no active 8k re-test plan)
 
 ### Current "Open / Not Yet Active" Set
 
-1. Phase H temporary 8k `glm` setting (not active now)
-2. Phases I/J
-3. Phase M
-4. Phase O
-5. Phase Q
+1. Phases I/J (partially reintroduced; planner/telemetry/fallback remains open)
+2. Phase M
+3. Phase O
+4. Phase Q
 
 ### 12.1 Phase R/S Implementation Record (Committed Baseline + Committed Hardening Follow-up)
 
@@ -1050,19 +1052,24 @@ Scope implemented:
 6. Ordered PyAudio teardown.
 7. Best-effort Ollama model release with bounded timeout and `keep_alive=0` unload requests.
 8. Shutdown intake freeze gates on recording/transcription/refine/promptify/UI mutation paths.
+9. Streaming refine/promptify Ollama calls with explicit in-flight cancel support via active-client registry.
+10. Shutdown-start hardening sweep that aborts orphaned tracked Ollama clients before worker-cancel loop.
 
 Key code anchors (current code, including hardening follow-up):
 
-1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:354`
-2. Hook setup: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2366`
-3. Signal entry: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2566`
-4. Worker cancel/wait helpers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2459`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2471`
-5. Recording join helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2509`
-6. Model release helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2538`
-7. Main shutdown coordinator: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3286`
-8. `closeEvent` delegation: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3354`
-9. New timeout + client wrappers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:263`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:296`
-10. Wakeup-fd bridge support: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:381`
+1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:557`
+2. Hook setup: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2723`
+3. Signal entry: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3101`
+4. Worker cancel/wait helpers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2994`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3006`
+5. Recording join helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3044`
+6. Model release helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3073`
+7. Main shutdown coordinator: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3827`
+8. `closeEvent` delegation: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3899`
+9. Timeout + client wrappers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:327`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:331`
+10. Wakeup-fd bridge support: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:584`
+11. Per-request active Ollama abort helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:359`
+12. Shutdown orphan-abort sweep helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:373`
+13. Streaming collector used by refine/promptify call paths: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:404`
 
 Why this implementation pattern was chosen:
 
@@ -1084,13 +1091,18 @@ Closure checklist for `R/S` tasks (implementation status):
 8. Close path idempotence guard: `Implemented`.
 9. Ollama request timeout hardening: `Implemented` (committed in `473de0a`).
 10. Signal wakeup-fd hardening: `Implemented` (committed in `473de0a`).
+11. In-flight Ollama request abort on worker cancel (`TranscriptionThread`/`RefinementThread`/`PromptifyThread`): `Implemented`.
+12. Global pre-worker Ollama abort sweep (`_abort_all_active_ollama_clients`) in shutdown coordinator: `Implemented`.
 
 Validation status:
 
 1. `python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`: `Pass`.
-2. Runtime shutdown smoke (launch + `SIGTERM`): `Blocked in this environment` due to missing dependency (`ModuleNotFoundError: No module named 'pyaudio'`).
-3. Full R/S runtime matrix from Section `7`: `Pending` until environment has runtime audio dependency installed.
-4. Status interpretation: implementation is present; validation remains pending due environment dependency gap.
+2. Ollama runtime API reachability: `Pass` (`GET /api/version` returned `0.16.2`).
+3. Stream interruption probe: `Pass` (live `/api/chat` stream terminated client-side in ~1.5s; confirms practical cancellation-by-connection-close behavior).
+4. Unload contract probe: `Pass` (`/api/generate` with `keep_alive=0` returned `done_reason=unload`; `/api/ps` eventually empty after settle).
+5. Full GUI shutdown smoke (launch + `SIGTERM`) and Section `7` full matrix: `Pending` in this shell due runtime dependency gaps for full app execution (notably `pyaudio`/GUI runtime parity).
+6. Status interpretation: implementation is present and partially runtime-validated at Ollama API level; full end-to-end app matrix remains pending.
+7. Evidence artifact bundle: `/tmp/whisper-phase-validation/phase-r-s/20260219-192813/` (`py_compile.txt`, `ollama-version.json`, `ollama-tags.json`, `runtime-validation.json`).
 
 ---
 
@@ -1105,12 +1117,12 @@ Use this as a fast navigation index before reintroducing code from stash:
 
 | Open Phase | Stash-only symbols/features | Current file anchor(s) to patch |
 |---|---|---|
-| I/J runtime tuning | `OLLAMA_KEEP_ALIVE`, warmup, telemetry fields, dynamic chat options | `TranscriptionThread.refine_text` (`...Hybrid_v5.py:2044`), `TranscriptionThread.promptify_text` (`...Hybrid_v5.py:2099`), `RefinementThread.refine_text` (`...Hybrid_v5.py:2191`), `PromptifyThread.promptify_text` (`...Hybrid_v5.py:2288`) |
+| I/J runtime tuning | Still-open subset: per-call telemetry logging, dynamic planning hooks (`_plan_ollama_budget`), richer runtime diagnostics. Already present: `OLLAMA_KEEP_ALIVE`, warmup controls, model-switch lifecycle, streamed cancel hooks. | `TranscriptionThread.refine_text` (`...Hybrid_v5.py:2261`), `TranscriptionThread.promptify_text` (`...Hybrid_v5.py:2319`), `RefinementThread.refine_text` (`...Hybrid_v5.py:2427`), `PromptifyThread.promptify_text` (`...Hybrid_v5.py:2529`) |
 | M adaptive budgeting | `_estimate_tokens_from_text`, `_estimate_tokens_from_messages`, `_desired_output_tokens`, `_plan_ollama_budget`, `_split_text_by_token_budget` | helper-function region before worker classes; then same Ollama call anchors above |
-| O/Q fallback + hardening | `_ollama_chat_with_ctx_fallback`, optional `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`, richer diagnostics | helper-function region + all chat call sites (`...Hybrid_v5.py:2074`, `...Hybrid_v5.py:2123`, `...Hybrid_v5.py:2220`, `...Hybrid_v5.py:2311`) |
-| R/S graceful shutdown | `aboutToQuit` wiring, `_graceful_shutdown`, global cancel/wait/join, unload flow | Implemented in `HEAD`; hardening is also in `HEAD` at `UnixSignalBridge` (`...Hybrid_v5.py:354`), hook setup (`...Hybrid_v5.py:2366`), shutdown coordinator (`...Hybrid_v5.py:3286`), and `closeEvent` delegation (`...Hybrid_v5.py:3354`) |
+| O/Q fallback + hardening | `_ollama_chat_with_ctx_fallback`, optional `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`, richer diagnostics | helper-function region + all streamed chat call sites (`...Hybrid_v5.py:2261`, `...Hybrid_v5.py:2319`, `...Hybrid_v5.py:2427`, `...Hybrid_v5.py:2529`) |
+| R/S graceful shutdown | `aboutToQuit` wiring, `_graceful_shutdown`, global cancel/wait/join, unload flow | Implemented in `HEAD`; hardening is in `HEAD` at `UnixSignalBridge` (`...Hybrid_v5.py:557`), hook setup (`...Hybrid_v5.py:2723`), shutdown coordinator (`...Hybrid_v5.py:3827`), `closeEvent` delegation (`...Hybrid_v5.py:3899`), plus abort helpers (`...Hybrid_v5.py:359`, `...Hybrid_v5.py:373`) |
 
-### 13.1 Runtime Tuning Baseline (Phase I/J) — Stash-only Features
+### 13.1 Runtime Tuning Baseline (Phase I/J) — Stash-Origin Features, Partially Reintroduced
 
 What was added in the after-all snapshot:
 
@@ -1178,6 +1190,20 @@ Why it is currently absent:
 | `MLX_CLEAR_CACHE_EVERY_N_CHUNKS` | `2` | Periodic cache clear cadence in chunk loop. |
 | `MLX_CLEAR_CACHE_MEMORY_MB` | `0` | Memory-threshold gate for cache clear (`0` disables thresholding). |
 
+#### 13.1.a.1 Current `HEAD` Addendum (`2026-02-19`) — Model-Switch Lifecycle Knobs
+
+These knobs are now present in current `HEAD` to support safe, user-driven model lifecycle behavior:
+
+| Variable | Default in current `HEAD` | Purpose |
+|---|---:|---|
+| `OLLAMA_MODEL_SWITCH_WARMUP_ENABLED` | `True` | Enables warmup when model selection changes. |
+| `OLLAMA_MODEL_SWITCH_UNLOAD_OTHERS` | `True` | Enables best-effort unload for non-selected models. |
+| `OLLAMA_MODEL_SWITCH_DEFER_WHEN_BUSY` | `True` | Defers model transition while recording/transcription is in progress. |
+| `OLLAMA_MODEL_SWITCH_TIMEOUT_SEC` | `8.0` | Timeout budget for warmup/unload calls during model transitions. |
+| `OLLAMA_MODEL_SWITCH_KEEP_ALIVE` | `OLLAMA_KEEP_ALIVE` | Keep-alive applied to model-change warmup calls. |
+| `OLLAMA_WARMUP_NUM_CTX` | `2048` | Context used for low-cost warmup request. |
+| `OLLAMA_WARMUP_NUM_PREDICT` | `8` | Output cap used for low-cost warmup request. |
+
 #### 13.1.b Recommended conservative rollout profile for first reintroduction pass
 
 Use this profile initially to reduce regression risk while validating Phase I/J plumbing:
@@ -1185,6 +1211,10 @@ Use this profile initially to reduce regression risk while validating Phase I/J 
 ```bash
 export OLLAMA_KEEP_ALIVE=10m
 export OLLAMA_WARMUP_ENABLED=true
+export OLLAMA_MODEL_SWITCH_WARMUP_ENABLED=true
+export OLLAMA_MODEL_SWITCH_UNLOAD_OTHERS=true
+export OLLAMA_MODEL_SWITCH_DEFER_WHEN_BUSY=true
+export OLLAMA_MODEL_SWITCH_TIMEOUT_SEC=8
 export OLLAMA_AUTO_BUMP_ENABLED=false
 export OLLAMA_AUTO_BUMP_BEYOND_CONFIG=false
 export OLLAMA_NUM_PREDICT_MIN=256
@@ -1214,6 +1244,98 @@ Rationale:
 
 1. This keeps first-slice blast radius small and preserves clean phase boundaries.
 2. Missing-feature reintroduction remains ordered for still-open phases: `I/J` -> `M` -> `O/Q`.
+
+#### 13.1.d Detailed Historical Implementation Record (from `stash@{0}`)
+
+This ledger captures what was actually implemented during the historical tuning arc so reimplementation can be precise and auditable.
+
+Historical feature bundle details:
+
+1. Runtime env readers were added for integer/boolean/float knobs (`_env_int`, `_env_bool`, `_env_float`).
+2. Runtime tuning constants were added with defaults for `keep_alive`, context safety, output caps/ratios, warmup toggles, and cache cadence gates.
+3. Ollama model usage tracking helpers were added (`_track_ollama_model_usage`, `_snapshot_tracked_ollama_models`, `_clear_tracked_ollama_models`) to support best-effort unload behavior.
+4. Ollama warmup behavior was added via `OllamaWarmup.warm_model(...)` and started in background from app startup/model selection paths.
+5. Telemetry logger `_log_ollama_metrics(...)` was added to capture `total/load/prompt_eval/eval` durations and token counts.
+6. Runtime call paths were modified to pass `keep_alive`, dynamic `num_ctx`/`num_predict`, and telemetry context.
+
+Historical call-path changes (stash) vs current behavior:
+
+| Runtime path | Historical stash behavior | Current `HEAD` behavior | Ownership in reintroduction plan |
+|---|---|---|---|
+| `TranscriptionThread.refine_text` | `keep_alive` + planned `num_ctx`/`num_predict` + telemetry + fallback retry | `keep_alive` + streamed collector (`_ollama_chat_stream_collect`) + cancel-aware abort; planner/telemetry/fallback still missing | `I/J`: add telemetry only; keep planner/fallback deferred |
+| `TranscriptionThread.promptify_text` | same pattern as refine path | same as above (streamed collector + cancel-aware abort, no planner/telemetry yet) | same split as above |
+| `RefinementThread.refine_text` | same pattern as transcription refine | same as above (streamed collector + cancel-aware abort, no planner/telemetry yet) | same split as above |
+| `PromptifyThread.promptify_text` | same pattern as transcription promptify | same as above (streamed collector + cancel-aware abort, no planner/telemetry yet) | same split as above |
+| App startup/model selection | background `OllamaWarmup` for selected model | startup keeps no Ollama warmup; model selection triggers transition worker with warmup/offload guards | `I/J` |
+
+Important boundary note:
+
+1. Historical tuning arc bundled features that are now intentionally separated across phases.
+2. In this handover, planner/chunking helpers are `M`, context fallback retry is `O`, and optional tokenizer/cache-threshold hardening is `Q`.
+3. First-slice `I/J` reintroduction should only include `keep_alive`, non-fatal warmup, and telemetry as defined in Section `13.1.c`.
+
+#### 13.1.e Phase I/J Reimplementation Tracker (Living Checklist)
+
+Tracking flags:
+
+1. `Reimplemented` = code exists in current `HEAD` with intended behavior.
+2. `Validated` = Section `7` evidence captured for this item in runtime logs/results.
+
+Update this table in every incremental PR/commit:
+
+| ID | Item | Historical symbols / behavior | Current `HEAD` state | Reimplemented | Validated | Notes / Evidence |
+|---|---|---|---|---|---|---|
+| `IJ-01` | Add minimal runtime knobs for first pass | `OLLAMA_KEEP_ALIVE`, `OLLAMA_WARMUP_ENABLED` | Present | `[x]` | `[ ]` | `OLLAMA_KEEP_ALIVE` + `OLLAMA_WARMUP_ENABLED` present in current working tree |
+| `IJ-02` | Propagate `keep_alive` to all four chat call paths | four runtime call sites in worker classes | Present | `[x]` | `[ ]` | `keep_alive=OLLAMA_KEEP_ALIVE` is present on all four runtime call paths |
+| `IJ-03` | Add non-fatal Ollama warmup | `OllamaWarmup.warm_model`, background warmup trigger | Present (model-switch scoped) | `[x]` | `[ ]` | Warmup now runs only on model picklist change; startup default selection does not warm |
+| `IJ-04` | Add per-call Ollama telemetry logging | `_log_ollama_metrics` (`load/prompt_eval/eval`) | Missing | `[ ]` | `[ ]` | |
+| `IJ-05` | Preserve model-usage tracking integration | `_track_ollama_model_usage`, tracked model snapshot/clear | Present in current `HEAD` | `[x]` | `[ ]` | Already in `HEAD` from committed shutdown work; do not duplicate |
+| `IJ-06` | Preserve one-shot semantics | no conversation-history carryover; keep `think` handling | Present | `[x]` | `[ ]` | Verify behavior during runtime matrix |
+| `IJ-07` | Close Phase I/J acceptance gate | Section `13.6` I/J criteria + Section `7` evidence | Pending | `[ ]` | `[ ]` | |
+| `IJ-08` | Startup behavior guard | Do not warm default model on initial app open | Present | `[x]` | `[ ]` | No startup Ollama warmup call path; only MLX `TranscriberWarmup` remains on startup |
+| `IJ-09` | Model-switch transition orchestration | `on_model_selector_changed` -> transition worker with sequence/cancel | Present | `[x]` | `[ ]` | `OllamaModelTransitionThread` + queue/defer/flush workflow added |
+| `IJ-10` | Offload non-selected models | best-effort unload (`keep_alive=0`) for non-selected models | Present | `[x]` | `[ ]` | Uses tracked models + `/api/ps` with app-known-model filter + in-flight model exclusion guard |
+| `IJ-11` | Shutdown integration for model lifecycle | cancel transition worker + clear pending transition state | Present | `[x]` | `[ ]` | `_cancel_model_transition_background()` invoked from `_graceful_shutdown` |
+| `M-GUARD-01` | Keep planner/chunk helpers out of first I/J pass | `_estimate_tokens*`, `_desired_output_tokens`, `_plan_ollama_budget`, `_split_text_by_token_budget` | Absent | `[x]` | `[ ]` | Scope guard (must remain absent in I/J-only commits) |
+| `O-GUARD-01` | Keep context-retry fallback out of first I/J pass | `_ollama_chat_with_ctx_fallback` | Absent | `[x]` | `[ ]` | Scope guard |
+| `Q-GUARD-01` | Keep tokenizer/cache-threshold hardening out of first I/J pass | `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB` behavior | Absent | `[x]` | `[ ]` | Scope guard |
+
+#### 13.1.f Phase I/J Run Journal Template (Working vs Not Working)
+
+Use one row per run batch to track what worked and what failed while reintroducing Phase `I/J`.
+
+| Date | Commit / Ref | Change slice IDs | Corpus batch | Empty outputs count | RSS median / peak | Result (`PASS`/`FAIL`) | Notes |
+|---|---|---|---|---:|---|---|---|
+| `YYYY-MM-DD` | `<sha>` | `IJ-01, IJ-02` | `short-01 + medium-01` | `0` | `median=...MB peak=...MB` | `PASS` | |
+
+Recommended evidence folder:
+
+```bash
+/tmp/whisper-phase-validation/phase-i-j/<timestamp>/
+```
+
+Store at minimum:
+
+1. command outputs from Section `14`,
+2. runtime logs for each run row,
+3. quick pass/fail note for each changed tracker item (`IJ-*`).
+
+#### 13.1.g Current `HEAD` Behavior Note — Intelligent Model Lifecycle (Implemented, Partially Validated)
+
+Current implementation behavior:
+
+1. App startup does **not** trigger Ollama warmup for the default selected model.
+2. Model warmup is triggered only when the model picklist selection changes.
+3. Transition runs in a dedicated background worker (`OllamaModelTransitionThread`) with cancellation support and sequence ordering.
+4. Non-selected models are offloaded best-effort using `keep_alive=0`.
+5. Transition offload candidates are guarded to avoid unloading models currently used by in-flight workers.
+6. Transition can be deferred while recording/transcription is active (`OLLAMA_MODEL_SWITCH_DEFER_WHEN_BUSY=true`), then retried when idle.
+7. Shutdown path cancels transition work and clears pending lifecycle queue before worker join/unload phases.
+8. Runtime chat paths for refine/promptify use streamed collection with explicit in-flight abort on worker cancel, and shutdown performs a pre-worker orphan abort sweep.
+
+Scope note:
+
+1. This implementation remains within `I/J` scope and does not reintroduce `M`/`O`/`Q` helper stacks.
 
 ### 13.2 Adaptive Budgeting Core (Phase M) — Stash-only Functions
 
@@ -1368,18 +1490,20 @@ Implemented architecture:
 5. Ordered resource teardown: PyAudio termination then best-effort Ollama model unload.
 6. Intake freeze checks to prevent new tasks from starting while shutdown is active.
 7. Follow-up hardening adds Ollama client timeout wrappers plus `set_wakeup_fd` support in the Unix signal bridge path.
+8. Additional hardening adds streamed-call abort plumbing (`_abort_active_ollama_client`) and pre-worker orphan sweep (`_abort_all_active_ollama_clients`) in shutdown.
 
 Current local anchors:
 
-1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:354`
-2. Hook setup and signal registration: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2366`
-3. Worker cancellation and waits: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2459`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2471`
-4. Recording join helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2509`
-5. Model release helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2538`
-6. Coordinator: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3286`
-7. `closeEvent` delegation: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3354`
-8. Wakeup-fd support: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:381`
-9. Timeout wrappers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:263`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:296`
+1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:557`
+2. Hook setup and signal registration: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2723`
+3. Worker cancellation and waits: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2994`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3006`
+4. Recording join helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3044`
+5. Model release helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3073`
+6. Coordinator: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3827`
+7. `closeEvent` delegation: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3899`
+8. Wakeup-fd support: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:584`
+9. Timeout wrappers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:327`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:331`
+10. Streamed-call abort helpers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:359`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:373`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:404`
 
 Why it is implemented this way:
 
@@ -1400,11 +1524,15 @@ Closure state for R/S tasks (implementation status):
 8. Idempotent close handling: `Implemented` (single-flight guard + non-forced close retry behavior).
 9. Ollama call timeout hardening (`Client(... timeout=...)` wrappers): `Implemented` (committed in `473de0a`).
 10. Signal wakeup-fd hardening (`set_wakeup_fd`): `Implemented` (committed in `473de0a`).
+11. In-flight streamed Ollama abort on worker cancel: `Implemented`.
+12. Pre-worker global Ollama abort sweep at shutdown start: `Implemented`.
 
 Validation note:
 
 1. Compile check passed locally.
-2. Runtime close/signal smoke is pending environment readiness because `pyaudio` is not installed in the current execution environment.
+2. Local Ollama API runtime checks passed (`/api/version`, streaming interruption probe, unload contract probe with `keep_alive=0`).
+3. Full GUI close/signal smoke remains pending environment parity because `pyaudio` is not installed in the current execution environment for full app launch.
+4. Artifact bundle for this validation pass: `/tmp/whisper-phase-validation/phase-r-s/20260219-192813/`.
 
 ### 13.6 Proposed Phase-Specific Acceptance Criteria (to reduce reimplementation ambiguity)
 
