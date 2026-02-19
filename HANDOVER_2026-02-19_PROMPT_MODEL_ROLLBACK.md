@@ -18,7 +18,7 @@ Current implementation boundary:
 
 1. Already implemented and active: prompt engineering wave + selected post-process flow + GLM prompt-quality rewrite (see Section 12).
 2. Open/pending for reimplementation: Phases `I/J`, `M`, `O`, `Q` (and optional revisit of temporary Phase H 8k experiment).
-3. Implemented locally and pending commit/runtime-matrix confirmation: Phase `R/S`.
+3. Implemented in committed `HEAD`: Phase `R/S` baseline (`e78f6d9`); additional hardening follow-up is in current working tree pending commit/runtime-matrix confirmation.
 
 Three script versions every new agent must compare:
 
@@ -45,8 +45,8 @@ git diff --stat 6c816e6..stash@{0} -- $SCRIPT
 # targeted symbol verification (still-open phases)
 git show stash@{0}:$SCRIPT | rg -n "OLLAMA_KEEP_ALIVE|_estimate_tokens_from_text|_plan_ollama_budget|_ollama_chat_with_ctx_fallback|tiktoken|MLX_CLEAR_CACHE_MEMORY_MB|keep_alive|num_predict"
 
-# local R/S implementation verification (working tree)
-rg -n "UnixSignalBridge|_setup_shutdown_hooks|_graceful_shutdown|aboutToQuit|closeEvent|_release_model_resources" $SCRIPT
+# R/S implementation + hardening verification (HEAD/working tree)
+rg -n "UnixSignalBridge|_setup_shutdown_hooks|_graceful_shutdown|aboutToQuit|closeEvent|_release_model_resources|set_wakeup_fd|_ollama_chat_with_timeout|OLLAMA_REQUEST_TIMEOUT_SEC|shutdown_incomplete" $SCRIPT
 ```
 
 Required reading order for new agents:
@@ -71,7 +71,7 @@ Open work checklist:
 2. `[ ]` Phase M adaptive budgeting stack
 3. `[ ]` Phase O hardening pack 1
 4. `[ ]` Phase Q hardening pack 2
-5. `[x]` Phase R/S graceful shutdown coordinator (`working tree`, pending commit + runtime matrix)
+5. `[x]` Phase R/S graceful shutdown coordinator (`implemented in HEAD`; runtime matrix still pending)
 6. `[ ]` Optional: re-test temporary Phase H `glm ctx_num=8192` experiment
 
 Runtime dependency baseline for onboarding:
@@ -102,13 +102,13 @@ Dependency-to-code-path mapping:
 
 | Dependency | Why it exists in this app | Current code anchors |
 |---|---|---|
-| `PyQt5` | GUI, signals/threads, lifecycle | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:77`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2103` |
-| `pyaudio` | microphone capture + stream handling | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:76`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:1385` |
-| `mlx_whisper` | transcription engine and model wrappers | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:84`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:268` |
-| `ollama` | refine/promptify model calls | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:85`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:1848` |
-| `scipy` (optional) | higher-quality audio preprocessing path | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:105`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:900` |
-| `webrtcvad` (optional) | voice activity detection path | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:115`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:1160` |
-| `psutil` (optional) | memory telemetry | `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:97`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:339` |
+| `PyQt5` | GUI, signals/threads, lifecycle | Symbols: `AudioTranscriberApp`, `UnixSignalBridge`, `_graceful_shutdown` |
+| `pyaudio` | microphone capture + stream handling | Symbols: `AudioRecorder`, `_terminate_pyaudio_singleton`, `record_audio_background` |
+| `mlx_whisper` | transcription engine and model wrappers | Symbols: `mlx_whisper.transcribe`, `load_or_reuse_mlx_model` |
+| `ollama` | refine/promptify model calls and model lifecycle | Symbols: `_ollama_chat_with_timeout`, `_list_ollama_models`, `_release_model_resources` |
+| `scipy` (optional) | higher-quality audio preprocessing path | Symbols: `AudioProcessor._reduce_noise`, `uniform_filter1d` |
+| `webrtcvad` (optional) | voice activity detection path | Symbols: `VoiceActivityDetector`, `VAD_AVAILABLE` |
+| `psutil` (optional) | memory telemetry | Symbols: `PSUTIL_AVAILABLE`, `log_memory_usage` |
 | `tiktoken` (stash-only arc) | tighter token counting for Phase O/Q experiments | `stash@{0}` only (not present in current HEAD) |
 
 Mandatory preflight before Phase I+ reimplementation:
@@ -142,12 +142,12 @@ Use this map to find exactly what you need:
 ## 0) Current Canonical State (Last Verified Checkpoint)
 
 - Branch: `main`
-- Current HEAD: `e56f57f`
+- Current HEAD: `e40665b`
 - Current upstream: `origin/main`
 - Rollback anchor commit (runtime baseline): `6a61314`
-- Working-tree state at checkpoint time: dirty (`GUI-whisper-chat-mode_colored_button_Hybrid_v5.py` modified with local Phase R/S implementation)
+- Working-tree state at checkpoint time: dirty (local R/S hardening follow-up in `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`; this handover also updated in current working tree)
 - Stash entries: `stash@{0}` exists with model/performance/shutdown experiments
-- Verification timestamp: `2026-02-19` (refreshed after local graceful-shutdown implementation pass)
+- Verification timestamp: `2026-02-19` (refreshed after committed R/S baseline + local hardening follow-up pass)
 
 Commands used to verify now:
 
@@ -162,8 +162,8 @@ git stash list
 
 Observed at checkpoint time:
 
-- `git status --short` -> `M GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`
-- `HEAD` -> `e56f57f`
+- `git status --short` -> `M GUI-whisper-chat-mode_colored_button_Hybrid_v5.py` (and this handover if doc updates are staged)
+- `HEAD` -> `e40665b`
 - rollback anchor -> `6a61314`
 - `stash@{0}` -> `On main: WIP model tuning + shutdown experiments backup`
 
@@ -212,6 +212,14 @@ These are the key commits the session referenced/produced:
    Message: `Refresh handover canonical refs and phase I/J validation scope`  
    Keeps handover synchronized with live repo context and rollout boundaries.
 
+9. `e78f6d9`  
+   Message: `Implement graceful shutdown coordinator and resource teardown`  
+   Commits baseline Phase `R/S` shutdown architecture in `HEAD`.
+
+10. `e40665b`  
+    Message: `Document Phase R/S implementation and status matrix updates`  
+    Commits initial R/S handover coverage (later refined again in this pass for provenance/validation clarity).
+
 No committed code from the runtime-tuning/shutdown experimental arc (Phases I onward) was retained; that arc remains in `stash@{0}` (`344b0fa`) and backup patch artifacts.
 
 ---
@@ -231,7 +239,7 @@ The work happened in three major waves:
 3. **Regression + rollback wave (stable recovery)**
 - User observed memory spikes and empty model outputs.
 - Decision made to revert to state right after prompt improvements and pre-performance tuning arc.
-- Local experiments preserved in stash and patch; core runtime baseline anchored at `6a61314`, followed by prompt/handover commits (`5947940`, `1a6e1b7`, `ff704c1`, `b626ce3`, `e56f57f`) that did not reintroduce Phase-I+ runtime tuning.
+- Local experiments preserved in stash and patch; core runtime baseline anchored at `6a61314`, followed by prompt/handover/shutdown commits (`5947940`, `1a6e1b7`, `ff704c1`, `b626ce3`, `e56f57f`, `e78f6d9`, `e40665b`) while still excluding Phase-I+ runtime tuning (`I/J`, `M`, `O`, `Q`).
 
 ---
 
@@ -672,11 +680,18 @@ Recorded outcome:
 - advanced chunking/token estimation hardening
 - tokenizer optional integration path
 - memory-threshold cache clearing logic
-- centralized graceful shutdown orchestration and model unload enhancements
+
+### Present in current HEAD (R/S baseline)
+
+- centralized graceful shutdown coordinator and model unload best-effort flow (commit `e78f6d9`)
+- unified `aboutToQuit` + `closeEvent` shutdown path
+- worker cancellation/wait orchestration and recording-thread join path
+- signal bridge entrypoint for process termination into Qt loop
 
 Live workspace note (`2026-02-19`):
 
-1. The graceful-shutdown orchestration/model-unload package (`R/S`) has now been implemented in the local working tree but is not yet committed into `HEAD`.
+1. The graceful-shutdown baseline (`R/S`) is already committed in `HEAD` (`e78f6d9`).
+2. Additional R/S hardening (Ollama client timeouts, wakeup-fd bridge support, conditional PyAudio teardown, non-daemon recording thread, stricter close policy on timeout) is implemented in current working tree and pending commit.
 
 ---
 
@@ -685,7 +700,7 @@ Live workspace note (`2026-02-19`):
 Context note:
 
 - `6a61314` is the **rollback/runtime anchor** used for stable-vs-experimental comparisons.
-- Current repository tip is newer (`e56f57f`) and includes post-rollback documentation/prompt commits.
+- Current repository tip is newer (`e40665b`) and includes post-rollback documentation + committed Phase `R/S` baseline.
 
 ### Confirm current state and stash anchor
 
@@ -785,8 +800,9 @@ Recommended order:
 
 Execution update (`2026-02-19`, local workspace):
 
-1. Step `6` (shutdown coordinator as isolated feature, `R/S`) has now been implemented in working-tree code and is pending commit/runtime-matrix confirmation.
-2. Remaining recommended order for still-open phases is `I/J` -> `M` -> `O/Q`.
+1. Step `6` (shutdown coordinator as isolated feature, `R/S`) is implemented in committed `HEAD` (`e78f6d9`).
+2. A hardening follow-up for Step `6` is implemented in current working tree and pending commit/runtime-matrix confirmation.
+3. Remaining recommended order for still-open phases is `I/J` -> `M` -> `O/Q`.
 
 Mandatory phase gate:
 
@@ -835,11 +851,12 @@ Execution note:
 1. Use the same corpus set before and after each phase increment.
 2. Record corpus IDs and run order in the evidence folder to keep memory-trend comparisons reproducible.
 
-Latest execution status (`2026-02-19`, local graceful-shutdown implementation pass):
+Latest execution status (`2026-02-19`, local graceful-shutdown hardening pass):
 
 1. `python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py` -> pass.
 2. Runtime smoke launch + signal test -> blocked in current environment (`ModuleNotFoundError: No module named 'pyaudio'`).
 3. Full shutdown runtime matrix remains pending until runtime audio dependency is available.
+4. New hardening symbols present in code: `OLLAMA_REQUEST_TIMEOUT_SEC`, `_ollama_chat_with_timeout`, `set_wakeup_fd`, `shutdown_incomplete`.
 
 Evidence capture minimum:
 
@@ -893,12 +910,14 @@ python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py > "$OUT_
 
 ## 9) Known Artifacts and Pointers
 
-- Current canonical HEAD commit: `e56f57f`
+- Current canonical HEAD commit: `e40665b`
 - Handover base reconstruction commit: `1a6e1b7`
 - Post-rollback GLM prompt refinement commit: `5947940`
 - Handover onboarding/phase-clarity extension commit: `ff704c1`
 - Handover runbook-strengthening follow-up commit: `b626ce3`
 - Handover canonical-ref sync commit: `e56f57f`
+- Committed R/S shutdown baseline commit: `e78f6d9`
+- Committed R/S handover matrix update commit: `e40665b`
 - Stable runtime anchor commit: `6a61314`
 - Promptify enhancement commit: `5bd8a65`
 - Pre-session foundational commit: `8f1a6e6`
@@ -906,7 +925,7 @@ python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py > "$OUT_
 - Stash commit hash (durable): `344b0fa0073e20049d9f14f995e7d7bafc30e281`
 - Backup patch artifact: `/tmp/whisper-local-pre-rollback-20260219-020752.patch`
 - Main implementation file: `/Users/luizconrado/PycharmProjects/whisper-local/GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`
-- Local Phase R/S implementation status: uncommitted working-tree changes in `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`
+- Local Phase R/S hardening follow-up status: uncommitted working-tree changes in `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py` (and this handover update)
 - Runtime shutdown smoke log from latest pass: `/tmp/whisper-shutdown-smoke.log`
 
 ---
@@ -935,8 +954,8 @@ Three reference snapshots used:
    Commit message: `Add Hybrid v5 transcriber with Ollama 0.6 API compatibility`  
    Line count snapshot: `2453`
 
-2. **Current active version**: `HEAD` = `e56f57f` (includes follow-up commits `5947940`, `1a6e1b7`, `ff704c1`, `b626ce3`, `e56f57f`)  
-   Line count now: `2799`
+2. **Current active version**: `HEAD` = `e40665b` (includes follow-up commits `5947940`, `1a6e1b7`, `ff704c1`, `b626ce3`, `e56f57f`, `e78f6d9`, `e40665b`)  
+   Line count now: `3272`
 
 3. **After all implementations (pre-rollback, regression period)**: `stash@{0}` (`344b0fa`)  
    Stash message: `WIP model tuning + shutdown experiments backup`  
@@ -944,14 +963,14 @@ Three reference snapshots used:
 
 Diff size indicators:
 
-- `6c816e6 -> HEAD`: `389 insertions, 43 deletions`
-- `HEAD -> stash@{0}`: `999 insertions, 76 deletions`
+- `6c816e6 -> HEAD`: `883 insertions, 64 deletions`
+- `HEAD -> stash@{0}`: `932 insertions, 482 deletions`
 - `6c816e6 -> stash@{0}`: `1376 insertions, 107 deletions`
 
-Working-tree update (not yet committed) after Phase `R/S` implementation:
+Working-tree update (not yet committed) after Phase `R/S` hardening follow-up:
 
-- Current workspace line count: `3272`
-- `HEAD -> working tree`: `494 insertions, 21 deletions`
+- Current workspace line count: `3384`
+- `HEAD -> working tree`: `177 insertions, 65 deletions`
 - Primary local implementation file: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`
 
 ---
@@ -964,11 +983,12 @@ Status keys used:
 - `Partial`: historically done in session, but not active now as code behavior/value
 - `Not Implemented (Current)`: absent in current `HEAD`; available only in stash/patch/history
 - `Implemented (Working Tree, Pending Commit)`: active in local workspace changes but not yet committed to `HEAD`
+- `Validation Pending`: implemented state exists but full runtime matrix has not yet been completed in this environment
 
 Important provenance note:
 
 1. Phases `I/J`, `M`, `O`, and `Q` do **not** have per-phase committed SHAs in current branch history.
-2. Phase `R/S` is now implemented in local working-tree code and pending commit.
+2. Phase `R/S` baseline is implemented in committed `HEAD` (`e78f6d9`); additional hardening follow-up is in local working tree pending commit.
 3. Reconstruction source for still-open phases remains `stash@{0}` (`344b0fa0073e20049d9f14f995e7d7bafc30e281`) plus patch artifacts.
 4. Remaining reintroduction order is still strict (`I/J` -> `M` -> `O/Q`).
 
@@ -985,7 +1005,7 @@ Important provenance note:
 | **Phase M** adaptive budgeting helper stack (`_estimate_tokens*`, `_plan_ollama_budget`, chunk fallback) | Missing | Missing | Present | Not Implemented (Current) | Stash-only function set; absent in current file. |
 | **Phase O** hardening pack 1 (context fallback retry, multilingual estimation, splitter improvements) | Missing | Missing | Present | Not Implemented (Current) | Stash-only helpers (`_ollama_chat_with_ctx_fallback`, multilingual token estimate). |
 | **Phase Q** hardening pack 2 (`tiktoken`, memory-threshold cache clear, richer diagnostics) | Missing | Missing | Present | Not Implemented (Current) | Stash-only imports/config: `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`. |
-| **Phases R/S** graceful shutdown coordinator (`aboutToQuit`, global cancel/wait/join, model unload flow) | Missing | Missing in committed `HEAD` | Present | Implemented (Working Tree, Pending Commit) | Local workspace now includes `UnixSignalBridge`, `_setup_shutdown_hooks`, `_graceful_shutdown`, `_release_model_resources`, shutdown gate checks, and `closeEvent` delegation in `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`. |
+| **Phases R/S** graceful shutdown coordinator (`aboutToQuit`, global cancel/wait/join, model unload flow) | Missing | Present | Present | Implemented (`HEAD`) + Validation Pending | Committed in `e78f6d9` and documented in `e40665b`; current working tree adds additional hardening (`OLLAMA_REQUEST_TIMEOUT_SEC`, `_ollama_chat_with_timeout`, `set_wakeup_fd`, timeout-safe close policy). |
 | **Phase U** rollback and stabilization path | N/A | Reflected by preserved baseline and stash artifact flow | N/A | Implemented (historical action) | Handover rollback steps + stash/patch artifact preservation. |
 
 ### Boundary Clarification: Phase H vs Phases I/J
@@ -1003,7 +1023,7 @@ Important provenance note:
 5. `8f1a6e6` foundation changes
 6. Phase G
 7. Phase U (historical rollback workflow and artifacting)
-8. Phases R/S (`working tree`, pending commit)
+8. Phases R/S (`implemented in HEAD`; runtime validation still pending in this environment)
 
 ### Current "Open / Not Yet Active" Set
 
@@ -1013,29 +1033,31 @@ Important provenance note:
 4. Phase O
 5. Phase Q
 
-### 12.1 Phase R/S Implementation Record (Local Working Tree)
+### 12.1 Phase R/S Implementation Record (Committed Baseline + Local Hardening Follow-up)
 
 Scope implemented:
 
 1. Unified graceful-shutdown coordinator with idempotent state and reason tracking.
 2. Trigger wiring for both `aboutToQuit` and `closeEvent`.
-3. Signal bridge for process termination signals into Qt event loop (`SIGINT`/`SIGTERM`/`SIGBREAK` where available).
+3. Signal bridge for process termination signals into Qt event loop (`SIGINT`/`SIGTERM`/`SIGBREAK` when available), with explicit POSIX-gated bridge behavior.
 4. Bounded worker cancellation and join orchestration.
 5. Bounded recording-thread join orchestration.
 6. Ordered PyAudio teardown.
 7. Best-effort Ollama model release with bounded timeout and `keep_alive=0` unload requests.
 8. Shutdown intake freeze gates on recording/transcription/refine/promptify/UI mutation paths.
 
-Key code anchors in current working tree:
+Key code anchors (current working tree, including hardening follow-up):
 
-1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:337`
-2. Hook setup: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2326`
-3. Signal entry: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2494`
-4. Worker cancel/wait helpers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2397`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2409`
-5. Recording join helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2441`
-6. Model release helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2470`
-7. Main shutdown coordinator: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3214`
-8. `closeEvent` delegation: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3255`
+1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:354`
+2. Hook setup: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2366`
+3. Signal entry: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2566`
+4. Worker cancel/wait helpers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2459`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2471`
+5. Recording join helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2509`
+6. Model release helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2538`
+7. Main shutdown coordinator: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3286`
+8. `closeEvent` delegation: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3354`
+9. New timeout + client wrappers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:263`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:296`
+10. Wakeup-fd bridge support: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:381`
 
 Why this implementation pattern was chosen:
 
@@ -1045,29 +1067,32 @@ Why this implementation pattern was chosen:
 4. Model unload remains best-effort and timeout-bounded so shutdown cannot hang on network/model API issues.
 5. Intake freeze avoids race conditions where new work starts during shutdown.
 
-Closure checklist for `R/S` tasks:
+Closure checklist for `R/S` tasks (implementation status):
 
-1. `aboutToQuit` hook: `Closed` (implemented locally).
-2. Signal-driven graceful shutdown path: `Closed` (implemented locally).
-3. Unified `_graceful_shutdown(...)` coordinator: `Closed` (implemented locally).
-4. Worker cancel/wait/join lifecycle: `Closed` (implemented locally).
-5. Recording thread wait/join lifecycle: `Closed` (implemented locally).
-6. PyAudio teardown in shutdown path: `Closed` (implemented locally).
-7. Ollama model unload best-effort flow: `Closed` (implemented locally).
-8. Close path idempotence guard: `Closed` (implemented locally).
+1. `aboutToQuit` hook: `Implemented`.
+2. Signal-driven graceful shutdown path: `Implemented`.
+3. Unified `_graceful_shutdown(...)` coordinator: `Implemented`.
+4. Worker cancel/wait/join lifecycle: `Implemented`.
+5. Recording thread wait/join lifecycle: `Implemented` (with non-daemon thread + guarded PyAudio teardown).
+6. PyAudio teardown in shutdown path: `Implemented` (conditional on recording thread join).
+7. Ollama model unload best-effort flow: `Implemented`.
+8. Close path idempotence guard: `Implemented`.
+9. Ollama request timeout hardening: `Implemented` (working tree, pending commit).
+10. Signal wakeup-fd hardening: `Implemented` (working tree, pending commit).
 
 Validation status:
 
 1. `python3 -m py_compile GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`: `Pass`.
 2. Runtime shutdown smoke (launch + `SIGTERM`): `Blocked in this environment` due to missing dependency (`ModuleNotFoundError: No module named 'pyaudio'`).
 3. Full R/S runtime matrix from Section `7`: `Pending` until environment has runtime audio dependency installed.
+4. Status interpretation: implementation is present; validation remains pending due environment dependency gap.
 
 ---
 
 ## 13) Open-Task Reconstruction Pack (What After-All Had That Current Does Not)
 
 This section is intentionally detailed so future agents can reintroduce still-open phases (`I/J`, `M`, `O`, `Q`) safely and in isolation.
-`R/S` is now implemented in the local working tree and documented below for traceability.
+`R/S` baseline is implemented in committed `HEAD`; additional hardening follow-up is in local working tree and documented below for traceability.
 
 ### 13.0 Open-Phase Symbol-to-Anchor Map (Current file insertion points)
 
@@ -1075,10 +1100,10 @@ Use this as a fast navigation index before reintroducing code from stash:
 
 | Open Phase | Stash-only symbols/features | Current file anchor(s) to patch |
 |---|---|---|
-| I/J runtime tuning | `OLLAMA_KEEP_ALIVE`, warmup, telemetry fields, dynamic chat options | `TranscriptionThread.refine_text` (`...Hybrid_v5.py:2004`), `TranscriptionThread.promptify_text` (`...Hybrid_v5.py:2059`), `RefinementThread.refine_text` (`...Hybrid_v5.py:2151`), `PromptifyThread.promptify_text` (`...Hybrid_v5.py:2248`) |
+| I/J runtime tuning | `OLLAMA_KEEP_ALIVE`, warmup, telemetry fields, dynamic chat options | `TranscriptionThread.refine_text` (`...Hybrid_v5.py:2044`), `TranscriptionThread.promptify_text` (`...Hybrid_v5.py:2099`), `RefinementThread.refine_text` (`...Hybrid_v5.py:2191`), `PromptifyThread.promptify_text` (`...Hybrid_v5.py:2288`) |
 | M adaptive budgeting | `_estimate_tokens_from_text`, `_estimate_tokens_from_messages`, `_desired_output_tokens`, `_plan_ollama_budget`, `_split_text_by_token_budget` | helper-function region before worker classes; then same Ollama call anchors above |
-| O/Q fallback + hardening | `_ollama_chat_with_ctx_fallback`, optional `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`, richer diagnostics | helper-function region + all `ollama.chat` call sites (`...Hybrid_v5.py:2034`, `...Hybrid_v5.py:2083`, `...Hybrid_v5.py:2180`, `...Hybrid_v5.py:2271`) |
-| R/S graceful shutdown | `aboutToQuit` wiring, `_graceful_shutdown`, global cancel/wait/join, unload flow | Implemented in local working tree at `UnixSignalBridge` (`...Hybrid_v5.py:337`), hook setup (`...Hybrid_v5.py:2326`), shutdown coordinator (`...Hybrid_v5.py:3214`), and `closeEvent` delegation (`...Hybrid_v5.py:3255`) |
+| O/Q fallback + hardening | `_ollama_chat_with_ctx_fallback`, optional `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`, richer diagnostics | helper-function region + all chat call sites (`...Hybrid_v5.py:2074`, `...Hybrid_v5.py:2123`, `...Hybrid_v5.py:2220`, `...Hybrid_v5.py:2311`) |
+| R/S graceful shutdown | `aboutToQuit` wiring, `_graceful_shutdown`, global cancel/wait/join, unload flow | Implemented in `HEAD`; current working tree adds hardening at `UnixSignalBridge` (`...Hybrid_v5.py:354`), hook setup (`...Hybrid_v5.py:2366`), shutdown coordinator (`...Hybrid_v5.py:3286`), and `closeEvent` delegation (`...Hybrid_v5.py:3354`) |
 
 ### 13.1 Runtime Tuning Baseline (Phase I/J) — Stash-only Features
 
@@ -1295,7 +1320,7 @@ chat_kwargs = {..., 'keep_alive': OLLAMA_KEEP_ALIVE, 'options': {..., 'num_predi
 
 Current gap:
 
-1. Current HEAD still uses direct chat calls with fixed option set, without this planning/fallback layer.
+1. Current HEAD uses timeout-wrapped chat calls with fixed option set, but still lacks the planning/fallback layer from phases `I/J`, `M`, `O`, `Q`.
 
 Current-to-target mini integration sketch (for each `ollama.chat` call site):
 
@@ -1307,7 +1332,7 @@ chat_kwargs = {
     "stream": False,
     "options": {"num_ctx": cfg.ctx_num, "temperature": cfg.temperature, "seed": cfg.seed},
 }
-response = ollama.chat(**chat_kwargs)
+response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
 
 # Phase I/M/O target pattern (simplified)
 source_tokens = _estimate_tokens_from_text(source_text)
@@ -1327,7 +1352,7 @@ chat_kwargs = {
 response, used_num_ctx, used_num_predict = _ollama_chat_with_ctx_fallback(...)
 ```
 
-### 13.5 Graceful Shutdown Orchestration (Phases R/S) — Implemented in local working tree (pending commit)
+### 13.5 Graceful Shutdown Orchestration (Phases R/S) — Implemented in `HEAD`, with local hardening follow-up pending commit
 
 Implemented architecture:
 
@@ -1337,16 +1362,19 @@ Implemented architecture:
 4. Worker and recording-thread cancellation/join with bounded timeout budgets.
 5. Ordered resource teardown: PyAudio termination then best-effort Ollama model unload.
 6. Intake freeze checks to prevent new tasks from starting while shutdown is active.
+7. Follow-up hardening adds Ollama client timeout wrappers plus `set_wakeup_fd` support in the Unix signal bridge path.
 
 Current local anchors:
 
-1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:337`
-2. Hook setup and signal registration: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2326`
-3. Worker cancellation and waits: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2397`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2409`
-4. Recording join helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2441`
-5. Model release helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2470`
-6. Coordinator: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3214`
-7. `closeEvent` delegation: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3255`
+1. `UnixSignalBridge`: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:354`
+2. Hook setup and signal registration: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2366`
+3. Worker cancellation and waits: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2459`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2471`
+4. Recording join helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2509`
+5. Model release helper: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:2538`
+6. Coordinator: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3286`
+7. `closeEvent` delegation: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:3354`
+8. Wakeup-fd support: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:381`
+9. Timeout wrappers: `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:263`, `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py:296`
 
 Why it is implemented this way:
 
@@ -1355,16 +1383,18 @@ Why it is implemented this way:
 3. Best-effort model unload avoids making network/model RPC success a hard requirement for application exit.
 4. Intake freeze prevents race conditions where new work appears while teardown is in progress.
 
-Closure state for R/S tasks:
+Closure state for R/S tasks (implementation status):
 
-1. `aboutToQuit` shutdown hook: `Closed` (`working tree`).
-2. Signal-driven shutdown entrypoint: `Closed` (`working tree`).
-3. Centralized `_graceful_shutdown(...)`: `Closed` (`working tree`).
-4. Worker cancel + wait orchestration: `Closed` (`working tree`).
-5. Recording-thread join orchestration: `Closed` (`working tree`).
-6. PyAudio termination in shutdown flow: `Closed` (`working tree`).
-7. Ollama unload flow (`keep_alive=0` best-effort): `Closed` (`working tree`).
-8. Idempotent close handling: `Closed` (`working tree`).
+1. `aboutToQuit` shutdown hook: `Implemented`.
+2. Signal-driven shutdown entrypoint: `Implemented`.
+3. Centralized `_graceful_shutdown(...)`: `Implemented`.
+4. Worker cancel + wait orchestration: `Implemented`.
+5. Recording-thread join orchestration: `Implemented`.
+6. PyAudio termination in shutdown flow: `Implemented` (now guarded by recording-thread join result).
+7. Ollama unload flow (`keep_alive=0` best-effort): `Implemented`.
+8. Idempotent close handling: `Implemented` (single-flight guard + non-forced close retry behavior).
+9. Ollama call timeout hardening (`Client(... timeout=...)` wrappers): `Implemented` (working tree, pending commit).
+10. Signal wakeup-fd hardening (`set_wakeup_fd`): `Implemented` (working tree, pending commit).
 
 Validation note:
 
@@ -1419,7 +1449,7 @@ Use these as concrete audit targets after each phase increment:
 2. Phase M: log planner decisions (`source_tokens`, planned `num_ctx`, planned `num_predict`, `should_chunk`).
 3. Phase O/Q: log fallback attempts (`context retry`, initial failure reason, retry context), and whether `tiktoken` path or heuristic path was used.
 4. Phase O/Q: when cache controls are active, log `MLX_CLEAR_CACHE_MEMORY_MB` decision inputs and whether cache clear executed.
-5. Phase R/S: log shutdown lifecycle markers (`shutdown_started`, `shutdown_already_started`, worker cancel summary, join outcomes, `shutdown_completed`).
+5. Phase R/S: log shutdown lifecycle markers (`shutdown_started`, `shutdown_already_started`, worker timeout details, `shutdown_incomplete`, `shutdown_completed`).
 
 ---
 
@@ -1447,15 +1477,15 @@ git show handover-phase-i-arc:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
 git show stash@{0}:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py | \
   rg -n "OLLAMA_KEEP_ALIVE|_estimate_tokens_from_text|_plan_ollama_budget|_split_text_by_token_budget|_ollama_chat_with_ctx_fallback|tiktoken|MLX_CLEAR_CACHE_MEMORY_MB|keep_alive|num_predict|load_duration|prompt_eval_duration|eval_duration"
 
-# inspect local R/S implementation symbols in working tree
-rg -n "UnixSignalBridge|_setup_shutdown_hooks|_on_about_to_quit|_on_termination_signal|_graceful_shutdown|_release_model_resources|aboutToQuit|closeEvent" \
+# inspect local R/S implementation/hardening symbols in working tree
+rg -n "UnixSignalBridge|_setup_shutdown_hooks|_on_about_to_quit|_on_termination_signal|_graceful_shutdown|_release_model_resources|_ollama_chat_with_timeout|OLLAMA_REQUEST_TIMEOUT_SEC|set_wakeup_fd|shutdown_incomplete|aboutToQuit|closeEvent" \
   GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
 
 # compare current HEAD vs after-all snapshot
 git diff HEAD..stash@{0} -- GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
 
 # snapshot current-head call patterns before editing (baseline proof)
-rg -n "ollama.chat\\(|num_ctx|temperature|seed|num_predict|keep_alive|aboutToQuit|closeEvent" \
+rg -n "_ollama_chat_with_timeout|_list_ollama_models|Client\\(|num_ctx|temperature|seed|num_predict|keep_alive|aboutToQuit|closeEvent" \
   GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
 ```
 

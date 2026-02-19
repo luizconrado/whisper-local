@@ -67,8 +67,6 @@ import json
 import math  # for isnan checks in confidence display
 import gc
 import inspect
-import urllib.request
-import urllib.error
 import weakref
 from dataclasses import dataclass
 from functools import partial, wraps
@@ -247,6 +245,24 @@ _OLLAMA_MODELS_USED: set = set()
 _APP: Optional[QApplication] = None
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+        if value <= 0:
+            raise ValueError("must be > 0")
+        return value
+    except Exception:
+        logger.warning(f"Invalid float value for {name}={raw!r}; using default {default}.")
+        return default
+
+
+# Bound Ollama calls so shutdown can rely on cooperative cancellation + finite network waits.
+OLLAMA_REQUEST_TIMEOUT_SEC = _env_float("OLLAMA_REQUEST_TIMEOUT_SEC", 90.0)
+
+
 def _track_ollama_model_usage(model_name: Optional[str]) -> None:
     if not model_name:
         return
@@ -273,17 +289,33 @@ def _get_ollama_base_url() -> str:
     return raw.rstrip("/")
 
 
+def _new_ollama_client(timeout_sec: float = OLLAMA_REQUEST_TIMEOUT_SEC):
+    return ollama.Client(host=_get_ollama_base_url(), timeout=max(0.1, float(timeout_sec)))
+
+
+def _ollama_chat_with_timeout(*, timeout_sec: float = OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs):
+    client = _new_ollama_client(timeout_sec=timeout_sec)
+    return client.chat(**chat_kwargs)
+
+
+def _list_ollama_models(timeout_sec: float = OLLAMA_REQUEST_TIMEOUT_SEC):
+    client = _new_ollama_client(timeout_sec=timeout_sec)
+    return client.list()
+
+
 def _query_ollama_running_models(timeout_sec: float = SHUTDOWN_OLLAMA_TIMEOUT_SEC) -> List[str]:
-    url = f"{_get_ollama_base_url()}/api/ps"
-    request = urllib.request.Request(url=url, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        client = _new_ollama_client(timeout_sec=timeout_sec)
+        payload = client.ps()
     except Exception as e:
         logger.debug(f"Could not query running Ollama models: {e}")
         return []
 
-    models = payload.get("models", []) if isinstance(payload, dict) else []
+    models = []
+    if isinstance(payload, dict):
+        models = payload.get("models", [])
+    else:
+        models = getattr(payload, "models", []) or []
     names = []
     for model_entry in models:
         if isinstance(model_entry, dict):
@@ -300,35 +332,20 @@ def _request_ollama_model_unload(model_name: str, timeout_sec: float = SHUTDOWN_
     Best-effort model unload request.
     Ollama supports unloading by issuing generate/chat with keep_alive=0.
     """
-    payload = {
-        "model": model_name,
-        "prompt": "",
-        "stream": False,
-        "keep_alive": 0,
-        "options": {
-            "temperature": 0.0,
-            "num_predict": 1
-        }
-    }
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url=f"{_get_ollama_base_url()}/api/generate",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            _ = response.read()
+        client = _new_ollama_client(timeout_sec=timeout_sec)
+        client.generate(
+            model=model_name,
+            prompt="",
+            stream=False,
+            keep_alive=0,
+            options={
+                "temperature": 0.0,
+                "num_predict": 1
+            },
+        )
         logger.info(f"Requested Ollama unload for model '{model_name}'")
         return True
-    except urllib.error.HTTPError as e:
-        details = ""
-        try:
-            details = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        logger.warning(f"Ollama unload HTTP error for '{model_name}': {e.code} {details}")
     except Exception as e:
         logger.warning(f"Ollama unload request failed for '{model_name}': {e}")
     return False
@@ -344,6 +361,8 @@ class UnixSignalBridge(QObject):
         self._write_fd: Optional[int] = None
         self._notifier: Optional[QSocketNotifier] = None
         self._installed_signals: Dict[int, Any] = {}
+        self._wakeup_fd_enabled = False
+        self._previous_wakeup_fd = -1
 
     def install(self, signums: List[int]) -> bool:
         if os.name != "posix":
@@ -356,6 +375,16 @@ class UnixSignalBridge(QObject):
 
         self._notifier = QSocketNotifier(self._read_fd, QSocketNotifier.Read, self)
         self._notifier.activated.connect(self._on_pipe_activated)
+
+        # Prefer wakeup-fd mode so signals can wake the event loop promptly,
+        # even while Python bytecode is not actively running.
+        if hasattr(py_signal, "set_wakeup_fd"):
+            try:
+                self._previous_wakeup_fd = py_signal.set_wakeup_fd(self._write_fd)
+                self._wakeup_fd_enabled = True
+            except Exception as e:
+                logger.warning(f"Could not enable signal wakeup fd: {e}")
+                self._wakeup_fd_enabled = False
 
         for signum in signums:
             try:
@@ -382,6 +411,14 @@ class UnixSignalBridge(QObject):
                 pass
         self._installed_signals.clear()
 
+        if self._wakeup_fd_enabled and hasattr(py_signal, "set_wakeup_fd"):
+            try:
+                py_signal.set_wakeup_fd(self._previous_wakeup_fd)
+            except Exception:
+                pass
+        self._wakeup_fd_enabled = False
+        self._previous_wakeup_fd = -1
+
         for fd in (self._read_fd, self._write_fd):
             if fd is None:
                 continue
@@ -393,6 +430,9 @@ class UnixSignalBridge(QObject):
         self._write_fd = None
 
     def _handle_signal(self, signum, _frame) -> None:
+        if self._wakeup_fd_enabled:
+            # Bytes are already delivered through set_wakeup_fd.
+            return
         if self._write_fd is None:
             return
         try:
@@ -2031,7 +2071,7 @@ class TranscriptionThread(QThread):
                 chat_kwargs['think'] = config.think
 
             _track_ollama_model_usage(self.model_name)
-            response = ollama.chat(**chat_kwargs)
+            response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
 
             # When think=True, Ollama routes reasoning to message.thinking and
             # delivers only the final answer in message.content (no <think> tags).
@@ -2080,7 +2120,7 @@ class TranscriptionThread(QThread):
                 chat_kwargs['think'] = model_config.think
 
             _track_ollama_model_usage(self.model_name)
-            response = ollama.chat(**chat_kwargs)
+            response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
             raw_content = response.message.content or ''
             if model_config.think is None:
                 raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
@@ -2177,7 +2217,7 @@ class RefinementThread(QThread):
                 chat_kwargs['think'] = config.think
 
             _track_ollama_model_usage(self.model_name)
-            response = ollama.chat(**chat_kwargs)
+            response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
 
             # When think=True, Ollama routes reasoning to message.thinking and
             # delivers only the final answer in message.content (no <think> tags).
@@ -2268,7 +2308,7 @@ class PromptifyThread(QThread):
                 chat_kwargs['think'] = model_config.think
 
             _track_ollama_model_usage(self.model_name)
-            response = ollama.chat(**chat_kwargs)
+            response = _ollama_chat_with_timeout(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC, **chat_kwargs)
             raw_content = response.message.content or ''
             if model_config.think is None:
                 raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
@@ -2369,6 +2409,11 @@ class AudioTranscriberApp(QWidget):
         with self._shutdown_lock:
             self._shutdown_completed = True
 
+    def _reset_shutdown_state(self) -> None:
+        with self._shutdown_lock:
+            self._shutdown_started = False
+            self._shutdown_reason = ""
+
     def _track_worker(self, worker: Optional[QThread]) -> None:
         if worker is None:
             return
@@ -2394,6 +2439,23 @@ class AudioTranscriberApp(QWidget):
         if hasattr(self, 'sensitivity_selector'):
             self.sensitivity_selector.setEnabled(False)
 
+    def _restore_ui_after_shutdown_abort(self) -> None:
+        if hasattr(self, 'recording_button'):
+            self.recording_button.setEnabled(True)
+        if hasattr(self, 'model_selector'):
+            self.model_selector.setEnabled(True)
+        if hasattr(self, 'language_selector'):
+            self.language_selector.setEnabled(True)
+        if hasattr(self, 'sensitivity_selector'):
+            self.sensitivity_selector.setEnabled(True)
+
+        if self.state.is_recording:
+            self.set_button_style("recording")
+        elif self.state.has_active_threads:
+            self.set_button_style("processing")
+        else:
+            self.set_button_style("ready")
+
     def _cancel_all_workers(self) -> int:
         workers = self._snapshot_workers()
         cancelled = 0
@@ -2406,11 +2468,12 @@ class AudioTranscriberApp(QWidget):
                 logger.warning(f"Failed to cancel worker {worker}: {e}")
         return cancelled
 
-    def _wait_for_workers(self, timeout_ms: int) -> Dict[str, int]:
+    def _wait_for_workers(self, timeout_ms: int) -> Dict[str, Any]:
         workers = self._snapshot_workers()
         deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
         waited = 0
         timed_out = 0
+        timed_out_workers: List[str] = []
 
         for worker in workers:
             is_running = False
@@ -2425,18 +2488,23 @@ class AudioTranscriberApp(QWidget):
             remaining_ms = int(max(0.0, (deadline - time.monotonic()) * 1000))
             if remaining_ms <= 0:
                 timed_out += 1
+                timed_out_workers.append(getattr(worker, "_thread_id", worker.__class__.__name__))
                 continue
 
             waited += 1
             try:
                 if not worker.wait(remaining_ms):
                     timed_out += 1
-                    logger.warning(f"Worker did not stop before timeout: {worker}")
+                    worker_name = getattr(worker, "_thread_id", worker.__class__.__name__)
+                    timed_out_workers.append(worker_name)
+                    logger.warning(f"Worker did not stop before timeout: {worker_name}")
             except Exception as e:
                 timed_out += 1
-                logger.warning(f"Error while waiting for worker {worker}: {e}")
+                worker_name = getattr(worker, "_thread_id", worker.__class__.__name__)
+                timed_out_workers.append(worker_name)
+                logger.warning(f"Error while waiting for worker {worker_name}: {e}")
 
-        return {"waited": waited, "timed_out": timed_out}
+        return {"waited": waited, "timed_out": timed_out, "timed_out_workers": timed_out_workers}
 
     def _wait_for_recording_thread(self, timeout_ms: int) -> bool:
         with self._recording_thread_lock:
@@ -2473,7 +2541,11 @@ class AudioTranscriberApp(QWidget):
             return
 
         running_models = set(_query_ollama_running_models(timeout_sec=timeout_sec))
-        unload_targets = [name for name in tracked_models if name in running_models]
+        if running_models:
+            unload_targets = [name for name in tracked_models if name in running_models]
+        else:
+            unload_targets = tracked_models
+            logger.info("Running-model query unavailable; attempting unload for all tracked Ollama models.")
 
         if not unload_targets:
             _clear_tracked_ollama_models()
@@ -2543,7 +2615,7 @@ class AudioTranscriberApp(QWidget):
 
     def fetch_models(self) -> List[str]:
         try:
-            response = ollama.list()
+            response = _list_ollama_models(timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC)
             models = response.models if hasattr(response, 'models') else response.get('models', [])
 
             installed_models = []
@@ -2907,7 +2979,7 @@ class AudioTranscriberApp(QWidget):
 
         recording_thread = threading.Thread(
             target=self.record_audio_background,
-            daemon=True,
+            daemon=False,
             name="record-audio-background"
         )
         with self._recording_thread_lock:
@@ -3211,17 +3283,26 @@ class AudioTranscriberApp(QWidget):
 
         QMessageBox.information(self, "Sensitivity Changed", info_text)
 
-    def _graceful_shutdown(self, reason: str, timeout_ms: int = SHUTDOWN_TIMEOUT_MS) -> bool:
+    def _graceful_shutdown(
+            self,
+            reason: str,
+            timeout_ms: int = SHUTDOWN_TIMEOUT_MS,
+            allow_forced_exit: bool = True
+    ) -> bool:
         with self._shutdown_lock:
             if self._shutdown_completed:
                 logger.info(f"shutdown_already_completed reason={reason} original_reason={self._shutdown_reason}")
                 return True
+            if self._shutdown_started:
+                logger.info(f"shutdown_already_started reason={reason} original_reason={self._shutdown_reason}")
+                return False
 
         first_entry = self._mark_shutdown_started(reason)
-        if first_entry:
-            logger.info(f"shutdown_started reason={reason}")
-        else:
-            logger.info(f"shutdown_already_started reason={reason} original_reason={self._shutdown_reason}")
+        if not first_entry:
+            logger.info(f"shutdown_start_race reason={reason}")
+            return False
+
+        logger.info(f"shutdown_started reason={reason} allow_forced_exit={allow_forced_exit}")
 
         self._set_shutdown_ui_state()
         self.state.is_recording = False
@@ -3234,27 +3315,58 @@ class AudioTranscriberApp(QWidget):
 
         wait_report = self._wait_for_workers(worker_wait_ms)
         recording_joined = self._wait_for_recording_thread(recording_wait_ms)
+        worker_timeouts = int(wait_report.get("timed_out", 0))
+        timed_out_workers = wait_report.get("timed_out_workers", [])
+        shutdown_clean = (worker_timeouts == 0 and recording_joined)
 
-        self._terminate_pyaudio_singleton()
+        if recording_joined:
+            self._terminate_pyaudio_singleton()
+        else:
+            logger.warning("Recording thread did not stop before timeout; skipping PyAudio teardown for safety.")
 
-        try:
-            self._release_model_resources(timeout_sec=SHUTDOWN_OLLAMA_TIMEOUT_SEC)
-        except Exception as e:
-            logger.warning(f"Model resource release failed during shutdown: {e}")
+        if shutdown_clean or allow_forced_exit:
+            try:
+                self._release_model_resources(timeout_sec=SHUTDOWN_OLLAMA_TIMEOUT_SEC)
+            except Exception as e:
+                logger.warning(f"Model resource release failed during shutdown: {e}")
 
-        self._cleanup_shutdown_hooks()
-        self._mark_shutdown_completed()
-        logger.info(
-            "shutdown_completed "
-            f"reason={reason} cancelled_workers={cancelled_workers} "
-            f"waited_workers={wait_report.get('waited', 0)} worker_timeouts={wait_report.get('timed_out', 0)} "
-            f"recording_joined={recording_joined} timeout_ms={timeout_ms}"
+            self._cleanup_shutdown_hooks()
+            self._mark_shutdown_completed()
+            logger.info(
+                "shutdown_completed "
+                f"reason={reason} cancelled_workers={cancelled_workers} "
+                f"waited_workers={wait_report.get('waited', 0)} worker_timeouts={worker_timeouts} "
+                f"timed_out_workers={timed_out_workers} recording_joined={recording_joined} "
+                f"forced_exit={not shutdown_clean} timeout_ms={timeout_ms}"
+            )
+            return True
+
+        self._reset_shutdown_state()
+        self._restore_ui_after_shutdown_abort()
+        logger.warning(
+            "shutdown_incomplete "
+            f"reason={reason} worker_timeouts={worker_timeouts} "
+            f"timed_out_workers={timed_out_workers} recording_joined={recording_joined} "
+            "close request will be ignored until threads stop."
         )
-        return True
+        return False
 
     def closeEvent(self, event):
-        self._graceful_shutdown(reason="closeEvent", timeout_ms=SHUTDOWN_TIMEOUT_MS)
-        event.accept()
+        can_close = self._graceful_shutdown(
+            reason="closeEvent",
+            timeout_ms=SHUTDOWN_TIMEOUT_MS,
+            allow_forced_exit=False
+        )
+        if can_close:
+            event.accept()
+            return
+        event.ignore()
+        if self.state.has_active_threads or self.state.is_recording:
+            QMessageBox.warning(
+                self,
+                "Shutdown Delayed",
+                "Background tasks are still stopping. Please wait and close again."
+            )
 
 
 # --------------------------
