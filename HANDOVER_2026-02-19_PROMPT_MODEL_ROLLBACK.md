@@ -6,13 +6,97 @@ Primary implementation file in this session: `/Users/luizconrado/PycharmProjects
 
 ---
 
+## A) New Agent Onboarding (Start Here)
+
+Mission:
+
+1. Keep current stable behavior intact.
+2. Reintroduce only open phases in safe increments.
+3. Avoid regressions previously seen (memory peaks + empty outputs).
+
+Current implementation boundary:
+
+1. Already implemented and active: prompt engineering wave + selected post-process flow + GLM prompt-quality rewrite (see Section 12).
+2. Open/pending for reimplementation: Phases `I/J`, `M`, `O`, `Q`, `R/S` (and optional revisit of temporary Phase H 8k experiment).
+
+Three script versions every new agent must compare:
+
+1. `Current`: `HEAD` version of `GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`
+2. `Before all implementations`: commit `6c816e6`
+3. `After all implementations (pre-rollback regression period)`: `stash@{0}` snapshot
+
+Canonical comparison commands:
+
+```bash
+cd /Users/luizconrado/PycharmProjects/whisper-local
+SCRIPT=GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+
+# version extraction for direct inspection
+git show HEAD:$SCRIPT > /tmp/whisper_v_current.py
+git show 6c816e6:$SCRIPT > /tmp/whisper_v_before.py
+git show stash@{0}:$SCRIPT > /tmp/whisper_v_after_all.py
+
+# three-way diffs
+git diff --stat 6c816e6..HEAD -- $SCRIPT
+git diff --stat HEAD..stash@{0} -- $SCRIPT
+git diff --stat 6c816e6..stash@{0} -- $SCRIPT
+
+# targeted symbol verification (open phases)
+git show stash@{0}:$SCRIPT | rg -n "OLLAMA_KEEP_ALIVE|_estimate_tokens_from_text|_plan_ollama_budget|_ollama_chat_with_ctx_fallback|tiktoken|MLX_CLEAR_CACHE_MEMORY_MB|_graceful_shutdown|aboutToQuit|keep_alive|num_predict"
+```
+
+Required reading order for new agents:
+
+1. Section `0` for canonical repo state.
+2. Section `1` for commit timeline and anchor commits.
+3. Section `12` for implemented vs open phase matrix.
+4. Section `13` for missing-feature reconstruction details and snippets.
+5. Section `14` for recovery and diff commands.
+6. Section `7` for validation matrix to run after each incremental change.
+
+Implementation rules (strict):
+
+1. Reintroduce one phase family at a time (`I/J` first, then `M`, then `O/Q`, then `R/S`).
+2. Keep each change set atomic and independently testable.
+3. Run validation matrix after each phase-level increment.
+4. Stop and rollback the last increment if memory spikes or empty outputs reappear.
+
+Open work checklist:
+
+1. `[ ]` Phase I/J runtime tuning pack
+2. `[ ]` Phase M adaptive budgeting stack
+3. `[ ]` Phase O hardening pack 1
+4. `[ ]` Phase Q hardening pack 2
+5. `[ ]` Phase R/S graceful shutdown coordinator
+6. `[ ]` Optional: re-test temporary Phase H `glm ctx_num=8192` experiment
+
+---
+
+## B) Navigation Map
+
+Use this map to find exactly what you need:
+
+1. `Section 0`: current branch/HEAD/stash truth.
+2. `Section 1`: key commits and sequence anchors.
+3. `Section 3`: detailed chronology of what happened.
+4. `Section 5`: reconstruction and recovery procedures.
+5. `Section 6`: recommended reintroduction order.
+6. `Section 7`: test matrix.
+7. `Section 9`: artifacts and pointers.
+8. `Section 11`: three-version comparison summary.
+9. `Section 12`: phase status matrix (implemented vs open).
+10. `Section 13`: deep technical reconstruction for open phases.
+11. `Section 14`: command pack for retrieval and selective restore.
+
+---
+
 ## 0) Current Canonical State (Verified Now)
 
 - Branch: `main`
-- Current HEAD: `6a61314`
+- Current HEAD: `1a6e1b7`
 - Current upstream: `origin/main`
-- Tracked file changes: none
-- Untracked files: this handover file only
+- Rollback anchor commit (runtime baseline): `6a61314`
+- Working-tree state during this revision: one modified tracked file (`HANDOVER_2026-02-19_PROMPT_MODEL_ROLLBACK.md`)
 - Stash entries: `stash@{0}` exists with model/performance/shutdown experiments
 
 Commands used to verify now:
@@ -28,8 +112,9 @@ git stash list
 
 Observed now:
 
-- `git status --short` -> `?? HANDOVER_2026-02-19_PROMPT_MODEL_ROLLBACK.md`
-- `HEAD` -> `6a61314`
+- `git status --short` -> `M HANDOVER_2026-02-19_PROMPT_MODEL_ROLLBACK.md`
+- `HEAD` -> `1a6e1b7`
+- rollback anchor -> `6a61314`
 - `stash@{0}` -> `On main: WIP model tuning + shutdown experiments backup`
 
 ---
@@ -52,7 +137,15 @@ These are the key commits the session referenced/produced:
    Produced in this session and pushed.  
    Contains post-transcription mode behavior fix (refine vs promptify by selected button).
 
-No further commits after `6a61314` were retained. Later work was local experimental and then stashed/rolled back.
+4. `5947940`  
+   Message: `Refine GLM transcription prompt with explicit quality gate`  
+   Produced after rollback anchoring to restore the Phase-G prompt-quality variant while still keeping Phase-I+ runtime tuning out of current code.
+
+5. `1a6e1b7`  
+   Message: `Add rollback handover with full session reconstruction`  
+   Adds this handover document to repository history.
+
+No committed code from the runtime-tuning/shutdown experimental arc (Phases I onward) was retained; that arc remains in `stash@{0}` and backup patch artifacts.
 
 ---
 
@@ -71,7 +164,7 @@ The work happened in three major waves:
 3. **Regression + rollback wave (stable recovery)**
 - User observed memory spikes and empty model outputs.
 - Decision made to revert to state right after prompt improvements and pre-performance tuning arc.
-- Local experiments preserved in stash and patch; active tree returned to `6a61314`.
+- Local experiments preserved in stash and patch; core runtime baseline anchored at `6a61314`, followed by prompt/handover commits (`5947940`, `1a6e1b7`) that did not reintroduce Phase-I+ runtime tuning.
 
 ---
 
@@ -518,16 +611,30 @@ Recorded outcome:
 
 ## 5) How Another Agent Can Reconstruct/Compare Exactly
 
-### Confirm baseline
+Context note:
+
+- `6a61314` is the **rollback/runtime anchor** used for stable-vs-experimental comparisons.
+- Current repository tip is newer (`1a6e1b7`) and includes post-rollback documentation/prompt commits.
+
+### Confirm current state and stash anchor
 
 ```bash
 cd /Users/luizconrado/PycharmProjects/whisper-local
 git status --short
 git rev-parse --short HEAD
+git log --oneline -n 6
 git stash list
+git show --no-patch --pretty=fuller stash@{0}
 ```
 
-### Compare stable baseline vs stash snapshot
+### Compare current HEAD vs stash snapshot
+
+```bash
+git diff --stat HEAD..stash@{0}
+git diff HEAD..stash@{0} -- GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+```
+
+### Compare rollback anchor vs stash snapshot (runtime-arc lens)
 
 ```bash
 git diff --stat 6a61314..stash@{0}
@@ -544,7 +651,10 @@ git show stash@{0}:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py | rg -n "_p
 
 ```bash
 git checkout -b codex/recover-model-optimization
+# Optional: if you want exact runtime-anchor context before apply:
+# git checkout 6a61314
 git stash apply stash@{0}
+git status --short
 ```
 
 ### Recover selectively (recommended)
@@ -614,7 +724,9 @@ Recommended order:
 
 ## 9) Known Artifacts and Pointers
 
-- Stable baseline commit: `6a61314`
+- Current canonical HEAD commit: `1a6e1b7`
+- Post-rollback GLM prompt refinement commit: `5947940`
+- Stable runtime anchor commit: `6a61314`
 - Promptify enhancement commit: `5bd8a65`
 - Pre-session foundational commit: `8f1a6e6`
 - Stash of experimental arc: `stash@{0}`
@@ -633,3 +745,371 @@ If a new agent starts from the current repo and reads only this document plus gi
 - and reintroduce changes in controlled increments with clear rollback points.
 
 This intentionally preserves your key requirement: proceed calmly, step-by-step, with optimization only where it is proven safe.
+
+---
+
+## 11) Three-Version Script Comparison (Revalidated After New Commits)
+
+Comparison target file:  
+`/Users/luizconrado/PycharmProjects/whisper-local/GUI-whisper-chat-mode_colored_button_Hybrid_v5.py`
+
+Three reference snapshots used:
+
+1. **Before all session implementations**: `6c816e6`  
+   Commit message: `Add Hybrid v5 transcriber with Ollama 0.6 API compatibility`  
+   Line count snapshot: `2453`
+
+2. **Current active version**: `HEAD` = `1a6e1b7` (includes follow-up commit `5947940`)  
+   Line count now: `2799`
+
+3. **After all implementations (pre-rollback, regression period)**: `stash@{0}` (`344b0fa`)  
+   Stash message: `WIP model tuning + shutdown experiments backup`  
+   Line count snapshot: `3722`
+
+Diff size indicators:
+
+- `6c816e6 -> HEAD`: `389 insertions, 43 deletions`
+- `HEAD -> stash@{0}`: `999 insertions, 76 deletions`
+- `6c816e6 -> stash@{0}`: `1376 insertions, 107 deletions`
+
+---
+
+## 12) Session Task Matrix (Current Status vs 3 Snapshots)
+
+Status keys used:
+
+- `Implemented`: active in current `HEAD`
+- `Partial`: historically done in session, but not active now as code behavior/value
+- `Not Implemented (Current)`: absent in current `HEAD`; available only in stash/patch/history
+
+| Phase / Task | Before (`6c816e6`) | Current (`HEAD`) | After-all (`stash@{0}`) | Current Status | Evidence |
+|---|---|---|---|---|---|
+| **Phase A** Promptify PREPARATION section + strict placement/order | Missing | Present | Present | Implemented | Handover `Phase A`; code has `PREPARATION` contract and exact item-1 rule. |
+| **Phase B** Promptify hardening (injection resistance, requirement/language preservation, stricter quality gates) | Missing | Present | Present | Implemented | Current Promptify rules include untrusted-source rule and anti-fabrication quality gates. |
+| **Phase C** Prompt improvements checkpoint commit `5bd8a65` | N/A | In history | In history ancestry | Implemented | Commit exists in branch history. |
+| **Phases D/E/F** Auto post-transcription follows selected mode (`refine`/`promptify`) | Missing | Present | Present | Implemented | `post_process_mode` in `TranscriptionThread` and passed by UI worker creation. |
+| **8f1a6e6 foundation** UI action picker + Promptify flow + sensitivity callback deadlock fix | Missing | Present | Present | Implemented | `QToolButton` action picker and lock-safe callback notify path exist in current. |
+| **Phase G** GLM refine prompt iterative rewrite (quality gate version) | Missing | Present | Present | Implemented | Current GLM system prompt includes `Restructuring quality gate (internal decision)`. |
+| **Phase H** temporary `glm ctx_num=8192` experiment | Missing | Not active (`ctx_num=16384`) | Historically present during arc | Partial | Session did this temporarily; current code no longer keeps `glm` at 8k. |
+| **Phases I/J** runtime tuning pack (`keep_alive`, adaptive hooks, `num_predict` planning, telemetry/warmup expansion) | Missing | Missing | Present | Not Implemented (Current) | Stash-only symbols: `OLLAMA_KEEP_ALIVE`, `_plan_ollama_budget`, metrics logger, warmup calls. |
+| **Phase M** adaptive budgeting helper stack (`_estimate_tokens*`, `_plan_ollama_budget`, chunk fallback) | Missing | Missing | Present | Not Implemented (Current) | Stash-only function set; absent in current file. |
+| **Phase O** hardening pack 1 (context fallback retry, multilingual estimation, splitter improvements) | Missing | Missing | Present | Not Implemented (Current) | Stash-only helpers (`_ollama_chat_with_ctx_fallback`, multilingual token estimate). |
+| **Phase Q** hardening pack 2 (`tiktoken`, memory-threshold cache clear, richer diagnostics) | Missing | Missing | Present | Not Implemented (Current) | Stash-only imports/config: `tiktoken`, `MLX_CLEAR_CACHE_MEMORY_MB`. |
+| **Phases R/S** graceful shutdown coordinator (`aboutToQuit`, global cancel/wait/join, model unload flow) | Missing | Missing | Present | Not Implemented (Current) | Stash-only `_graceful_shutdown` and `aboutToQuit` wiring. |
+| **Phase U** rollback and stabilization path | N/A | Reflected by preserved baseline and stash artifact flow | N/A | Implemented (historical action) | Handover rollback steps + stash/patch artifact preservation. |
+
+### Boundary Clarification: Phase H vs Phases I/J
+
+1. **Phase H scope** was limited to token-budget discussion plus temporary context experiments (including a temporary `glm` 8k setting during the arc).
+2. **Phase I begins** when runtime-tuning machinery appears (for example symbols such as `OLLAMA_KEEP_ALIVE`, `_plan_ollama_budget`, `_estimate_tokens_from_text`, `_ollama_chat_with_ctx_fallback`, telemetry fields, and dynamic `num_predict` planning).
+3. In current HEAD, `phi4` remains `ctx_num=8192` while `glm` is `ctx_num=16384`; therefore Phase H is marked `Partial` (historically applied, not currently active as temporary 8k `glm` behavior).
+
+### Current "Already Implemented" Set (effective now)
+
+1. Phase A
+2. Phase B
+3. Phase C (history checkpoint)
+4. Phases D/E/F
+5. `8f1a6e6` foundation changes
+6. Phase G
+7. Phase U (historical rollback workflow and artifacting)
+
+### Current "Open / Not Yet Active" Set
+
+1. Phase H temporary 8k `glm` setting (not active now)
+2. Phases I/J
+3. Phase M
+4. Phase O
+5. Phase Q
+6. Phases R/S
+
+---
+
+## 13) Open-Task Reconstruction Pack (What After-All Had That Current Does Not)
+
+This section is intentionally detailed so future agents can reintroduce features from Phase I onward safely and in isolation.
+
+### 13.1 Runtime Tuning Baseline (Phase I/J) — Stash-only Features
+
+What was added in the after-all snapshot:
+
+1. Environment-driven Ollama tuning constants (`keep_alive`, context safety, prediction caps, warmup toggles).
+2. Model usage tracking + running-model discovery helpers for unload decisions.
+3. Expanded warmup behavior for Ollama models and telemetry logging.
+
+Representative stash snippet:
+
+```python
+# Ollama runtime tuning (configurable via environment).
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "20m")
+OLLAMA_MIN_CTX = _env_int("OLLAMA_MIN_CTX", 2048)
+OLLAMA_CTX_SAFETY_TOKENS = _env_int("OLLAMA_CTX_SAFETY_TOKENS", 768)
+OLLAMA_NUM_PREDICT_MIN = _env_int("OLLAMA_NUM_PREDICT_MIN", 256)
+OLLAMA_NUM_PREDICT_MAX_REFINE = _env_int("OLLAMA_NUM_PREDICT_MAX_REFINE", 8192)
+OLLAMA_NUM_PREDICT_MAX_PROMPTIFY = _env_int("OLLAMA_NUM_PREDICT_MAX_PROMPTIFY", 8192)
+...
+OLLAMA_WARMUP_ENABLED = _env_bool("OLLAMA_WARMUP_ENABLED", True)
+```
+
+```python
+class OllamaWarmup:
+    @classmethod
+    def warm_model(cls, model_name: str) -> None:
+        ...
+        response = ollama.chat(
+            model=model_name,
+            messages=[{'role': 'user', 'content': 'warmup'}],
+            stream=False,
+            keep_alive=OLLAMA_KEEP_ALIVE,
+            options={'num_ctx': OLLAMA_MIN_CTX, 'temperature': 0.0, 'seed': 1, 'num_predict': 8}
+        )
+```
+
+Why it was added:
+
+1. Reduce cold-start latency.
+2. Bound context/output behavior per call.
+3. Improve observability for tuning decisions.
+
+Why it is currently absent:
+
+1. Entire runtime tuning arc was intentionally not retained in stable HEAD after regression wave.
+
+#### 13.1.a Environment Variable Inventory (from `stash@{0}`)
+
+| Variable | Default in stash snapshot | Purpose |
+|---|---:|---|
+| `OLLAMA_KEEP_ALIVE` | `20m` | Keep model loaded between calls to reduce cold starts. |
+| `OLLAMA_MIN_CTX` | `2048` | Lower bound for context window planning. |
+| `OLLAMA_CTX_SAFETY_TOKENS` | `768` | Reserved safety buffer in context budgeting. |
+| `OLLAMA_NUM_PREDICT_MIN` | `256` | Lower bound for output token budget. |
+| `OLLAMA_NUM_PREDICT_MAX_REFINE` | `8192` | Upper cap for refine-mode output. |
+| `OLLAMA_NUM_PREDICT_MAX_PROMPTIFY` | `8192` | Upper cap for promptify-mode output. |
+| `OLLAMA_OUTPUT_RATIO_REFINE` | `1.10` | Desired output/input ratio for refine mode. |
+| `OLLAMA_OUTPUT_RATIO_PROMPTIFY` | `1.00` | Desired output/input ratio for promptify mode. |
+| `OLLAMA_REFINE_MIN_FIDELITY_RATIO` | `0.85` | Minimum rewrite fidelity threshold before chunking. |
+| `OLLAMA_MIN_CHUNK_INPUT_TOKENS` | `256` | Smallest chunk size for token-based splitting. |
+| `OLLAMA_AUTO_BUMP_ENABLED` | `True` | Enables context auto-bump logic. |
+| `OLLAMA_AUTO_BUMP_CTX` | `16384` | Auto-bump target context. |
+| `OLLAMA_AUTO_BUMP_TRIGGER_TOKENS` | `5500` | Trigger threshold for bump attempt. |
+| `OLLAMA_AUTO_BUMP_BEYOND_CONFIG` | `False` | Allows bump beyond model config ceiling when enabled. |
+| `OLLAMA_WARMUP_ENABLED` | `True` | Enables Ollama warmup call path. |
+| `MLX_CLEAR_CACHE_EVERY_N_CHUNKS` | `2` | Periodic cache clear cadence in chunk loop. |
+| `MLX_CLEAR_CACHE_MEMORY_MB` | `0` | Memory-threshold gate for cache clear (`0` disables thresholding). |
+
+### 13.2 Adaptive Budgeting Core (Phase M) — Stash-only Functions
+
+What existed in after-all snapshot:
+
+1. Multilingual token estimation path.
+2. Message token envelope estimation.
+3. Desired output token planner per mode.
+4. Context/output planner returning `num_ctx`, `num_predict`, and chunk requirement hints.
+5. Token-budget text chunking pipeline.
+
+Representative stash snippet:
+
+```python
+def _estimate_tokens_from_text(text: str) -> int:
+    if _TT_ENCODING is not None:
+        return max(1, len(_TT_ENCODING.encode(normalized)))
+    ...
+```
+
+```python
+def _plan_ollama_budget(max_ctx: int, messages: List[Dict[str, Any]], mode: str, source_tokens: int) -> Dict[str, int]:
+    prompt_tokens = _estimate_tokens_from_messages(messages)
+    desired_predict = _desired_output_tokens(mode, source_tokens)
+    ...
+    return {"num_ctx": ..., "num_predict": ..., "should_chunk": ...}
+```
+
+```python
+def _split_text_by_token_budget(text: str, target_tokens: int) -> List[str]:
+    # paragraphs -> lines -> sentence punctuation (western + CJK) -> fallback split
+```
+
+Why it was added:
+
+1. Prevent output truncation/forced summarization on long transcripts.
+2. Keep rewrite fidelity while fitting context budget.
+
+Current gap:
+
+1. None of these helpers are active in current HEAD.
+
+### 13.3 Hardening Pack 1 + 2 (Phases O/Q) — Stash-only Reinforcements
+
+What existed in after-all snapshot:
+
+1. Context-window retry wrapper (`_ollama_chat_with_ctx_fallback`) that retries with configured context when auto-bump is rejected.
+2. Detailed response telemetry (`total/load/prompt_eval/eval` timing and counts).
+3. Optional `tiktoken` path for tighter token counting.
+4. Memory-threshold-gated MLX cache clearing (`MLX_CLEAR_CACHE_MEMORY_MB`).
+5. Better diagnostics around fallback failures.
+
+Representative stash snippet:
+
+```python
+try:
+    import tiktoken
+    _TT_ENCODING = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    tiktoken = None
+```
+
+```python
+def _ollama_chat_with_ctx_fallback(...):
+    try:
+        response = ollama.chat(**active_kwargs)
+    except Exception as exc:
+        if attempted_ctx <= fallback_ctx or not _is_ollama_context_error(exc):
+            raise
+        ...
+```
+
+```python
+MLX_CLEAR_CACHE_MEMORY_MB = _env_int("MLX_CLEAR_CACHE_MEMORY_MB", 0)
+...
+if MLX_CLEAR_CACHE_MEMORY_MB and PSUTIL_AVAILABLE:
+    should_clear_cache &= rss_mb >= MLX_CLEAR_CACHE_MEMORY_MB
+```
+
+Current gap:
+
+1. These hardening layers are not in current HEAD.
+
+### 13.4 Integration Points (Where Tuning Entered Runtime Paths)
+
+In the after-all snapshot, refine/promptify calls were wrapped by planning + fallback, with `keep_alive` and dynamic `num_predict`.
+
+Representative stash snippet (transcription-thread refine path):
+
+```python
+source_tokens = _estimate_tokens_from_text(text)
+plan = _plan_ollama_budget(config.ctx_num, messages, mode="refine", source_tokens=source_tokens)
+chat_kwargs = {
+    'model': self.model_name,
+    'messages': chunk_messages,
+    'stream': False,
+    'keep_alive': OLLAMA_KEEP_ALIVE,
+    'options': {'num_ctx': chunk_plan['num_ctx'], 'temperature': config.temperature, 'seed': config.seed, 'num_predict': chunk_plan['num_predict']}
+}
+response, used_num_ctx, used_num_predict = _ollama_chat_with_ctx_fallback(...)
+```
+
+Representative stash snippet (promptify path):
+
+```python
+plan = _plan_ollama_budget(model_config.ctx_num, messages, mode="promptify", source_tokens=source_tokens)
+chat_kwargs = {..., 'keep_alive': OLLAMA_KEEP_ALIVE, 'options': {..., 'num_predict': plan['num_predict']}}
+```
+
+Current gap:
+
+1. Current HEAD still uses direct chat calls with fixed option set, without this planning/fallback layer.
+
+### 13.5 Graceful Shutdown Orchestration (Phases R/S) — Stash-only
+
+What existed in after-all snapshot:
+
+1. App-level shutdown flags and locks (`_shutdown_started`, `_shutdown_lock`).
+2. Worker registry and cancel/wait orchestrators.
+3. Background thread tracking and joins.
+4. `aboutToQuit` hook and unified `_graceful_shutdown(...)`.
+5. PyAudio termination retries + best-effort model unload flow.
+
+Representative stash snippet:
+
+```python
+app = QApplication.instance()
+if app:
+    app.aboutToQuit.connect(self._on_about_to_quit)
+...
+def _graceful_shutdown(self, reason: str, timeout_ms: int = 12000) -> bool:
+    self._cancel_all_workers()
+    self._wait_for_recording_thread(...)
+    self._wait_for_workers(...)
+    self._terminate_pyaudio_singleton()
+    self._release_model_resources()
+```
+
+Current gap:
+
+1. Current HEAD retains simpler close handling and does not include this centralized coordinator.
+
+### 13.6 Proposed Phase-Specific Acceptance Criteria (to reduce reimplementation ambiguity)
+
+These are operational pass/fail gates to use when reintroducing missing phases.
+
+#### Phase I/J (runtime tuning + warmup + telemetry)
+
+Pass if all are true:
+
+1. No empty final outputs in `>=20` mixed-length runs (short, medium, long).
+2. Telemetry fields are consistently logged per call (`load_duration`, `prompt_eval_duration`, `eval_duration`, counts).
+3. Warmup path is non-fatal: failures are logged and do not block normal transcription/refinement.
+4. No behavior regression in selected post-process mode (`refine` vs `promptify`).
+
+#### Phase M (adaptive budgeting)
+
+Pass if all are true:
+
+1. For long inputs, planner computes bounded `num_ctx`/`num_predict` without raising context-window errors.
+2. Refine outputs preserve content fidelity vs source (no systematic truncation/summarization).
+3. Chunking activates only when budget requires it and returns merged readable output.
+
+#### Phase O/Q (fallback/hardening)
+
+Pass if all are true:
+
+1. Context-retry wrapper triggers only on context-like failures and succeeds/fails deterministically.
+2. `tiktoken` path is optional; absence falls back cleanly to heuristic estimation.
+3. Cache-clearing threshold logic behaves as configured and does not cause instability.
+4. Diagnostics include enough context to debug both primary and retry failures.
+
+#### Phases R/S (graceful shutdown)
+
+Pass if all are true:
+
+1. App exits cleanly while idle, recording, and processing (no deadlocks/hangs).
+2. Workers are canceled and joined within bounded timeout.
+3. Recording/background threads do not remain alive after shutdown.
+4. PyAudio/model resource cleanup occurs without fatal exceptions.
+5. Shutdown flow is idempotent (`aboutToQuit` + `closeEvent` do not double-fail).
+
+---
+
+## 14) Retrieval Commands for Future Reimplementation (Phase I -> End)
+
+Use these to inspect the exact after-all snapshot that contained the tuning/shutdown arc:
+
+```bash
+cd /Users/luizconrado/PycharmProjects/whisper-local
+
+# identify stash snapshot used in this handover
+git stash list
+git show --no-patch --pretty=fuller stash@{0}
+
+# inspect full file at after-all state
+git show stash@{0}:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+
+# inspect only open-task symbols (I onward)
+git show stash@{0}:GUI-whisper-chat-mode_colored_button_Hybrid_v5.py | \
+  rg -n "OLLAMA_KEEP_ALIVE|_estimate_tokens_from_text|_plan_ollama_budget|_split_text_by_token_budget|_ollama_chat_with_ctx_fallback|tiktoken|MLX_CLEAR_CACHE_MEMORY_MB|_graceful_shutdown|aboutToQuit|keep_alive|num_predict|load_duration|prompt_eval_duration|eval_duration"
+
+# compare current HEAD vs after-all snapshot
+git diff HEAD..stash@{0} -- GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+```
+
+Selective recovery approach (recommended):
+
+```bash
+# create a safe branch before reintroduction
+git checkout -b codex/reintroduce-phase-i-plus
+
+# selectively recover hunks from stash
+git checkout -p stash@{0} -- GUI-whisper-chat-mode_colored_button_Hybrid_v5.py
+```
+
+This section is intended to let future agents reproduce the missing arc with traceability and controlled incremental reintroduction.
