@@ -3465,6 +3465,13 @@ class AudioTranscriberApp(QWidget):
         else:
             self.re_refine_text()
 
+    def _clear_text_areas(self, *, clear_transcription: bool, clear_refined: bool) -> None:
+        if clear_transcription and hasattr(self, "transcription_box"):
+            self.transcription_box.clear()
+            self.current_transcription = ""
+        if clear_refined and hasattr(self, "refined_box"):
+            self.refined_box.clear()
+
     def toggle_recording(self):
         if self._is_shutting_down():
             logger.info("Cannot toggle recording during shutdown.")
@@ -3488,6 +3495,7 @@ class AudioTranscriberApp(QWidget):
         self.set_button_style("recording")
         self.progress_bar.setValue(0)
         self.state.is_recording = True
+        self._clear_text_areas(clear_transcription=True, clear_refined=True)
 
         # Reset confidence and quality displays
         self.confidence_label.setText("--")
@@ -3613,6 +3621,7 @@ class AudioTranscriberApp(QWidget):
 
         text = self.transcription_box.toPlainText().strip()
         if not text:
+            self._clear_text_areas(clear_transcription=False, clear_refined=True)
             return
 
         if self.state.has_active_threads:
@@ -3630,6 +3639,7 @@ class AudioTranscriberApp(QWidget):
                 return
             self._disconnect_worker_signals()
 
+        self._clear_text_areas(clear_transcription=False, clear_refined=True)
         self.set_button_style("processing")
         self.progress_bar.setValue(50)
         self.current_worker = RefinementThread(text, self.model_selector.currentText(), self.state)
@@ -3653,6 +3663,7 @@ class AudioTranscriberApp(QWidget):
 
         text = self._get_promptify_source_text()
         if not text:
+            self._clear_text_areas(clear_transcription=False, clear_refined=True)
             QMessageBox.information(self, "Promptify", "There is no text available to transform into a prompt.")
             return
 
@@ -3671,6 +3682,7 @@ class AudioTranscriberApp(QWidget):
                 return
             self._disconnect_worker_signals()
 
+        self._clear_text_areas(clear_transcription=False, clear_refined=True)
         self.set_button_style("processing")
         self.progress_bar.setValue(70)
         self.current_worker = PromptifyThread(text, self.model_selector.currentText(), self.state)
