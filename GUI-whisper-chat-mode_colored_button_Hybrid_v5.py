@@ -1362,33 +1362,6 @@ class ModelConfig:
                 promptify_prompt_key='default',
                 think=True,
             ),
-            'qwen3:latest': cls(
-                name='qwen3:latest',
-                ctx_num=16384,
-                temperature=0.5,
-                seed=1,
-                refine_prompt_key='glm_47_flash',
-                promptify_prompt_key='default',
-                think=True,
-            ),
-            'phi4-reasoning:latest': cls(
-                name='phi4-reasoning:latest',
-                ctx_num=16384,
-                temperature=0.2,
-                seed=1,
-                refine_prompt_key='glm_47_flash',
-                promptify_prompt_key='default',
-                think=None,
-            ),
-            'gpt-oss:latest': cls(
-                name='gpt-oss:latest',
-                ctx_num=16384,
-                temperature=0.5,
-                seed=1,
-                refine_prompt_key='glm_47_flash',
-                promptify_prompt_key='default',
-                think='high',
-            ),
         }
 
     @classmethod
@@ -1413,15 +1386,17 @@ class ModelConfig:
 
         logger.info(f"Resolving dynamic config for unknown model '{normalized_name}' via ollama show metadata.")
         show_payload = _show_ollama_model_payload(normalized_name, timeout_sec=OLLAMA_REQUEST_TIMEOUT_SEC)
-        is_gpt_oss = bool(show_payload and _is_gpt_oss_family(normalized_name, show_payload))
+        # GPT-OSS name/family detection should work even if metadata is unavailable.
+        is_gpt_oss = _is_gpt_oss_family(normalized_name, show_payload or {})
         is_thinking = bool(show_payload and _is_thinking_capable(show_payload))
+        source_label = "show" if show_payload else "name_only"
         if is_gpt_oss or is_thinking:
             think_value: Union[bool, str] = "high" if is_gpt_oss else True
             dynamic_config = _build_unknown_thinking_config(normalized_name, think_value=think_value)
             reason = "gpt_oss_family" if is_gpt_oss else "capabilities_thinking"
             logger.info(
                 f"Unknown model '{normalized_name}' dynamic policy selected "
-                f"(source=show, profile=glm_style, reason={reason}, "
+                f"(source={source_label}, profile=glm_style, reason={reason}, "
                 f"refine_prompt_key={dynamic_config.refine_prompt_key}, think={dynamic_config.think!r})."
             )
         else:
@@ -1429,7 +1404,7 @@ class ModelConfig:
             reason = "show_unavailable_or_no_thinking_capability" if not show_payload else "capabilities_no_thinking"
             logger.info(
                 f"Unknown model '{normalized_name}' dynamic policy selected "
-                f"(source=show, profile=phi_style, reason={reason}, "
+                f"(source={source_label}, profile=phi_style, reason={reason}, "
                 f"refine_prompt_key={dynamic_config.refine_prompt_key}, think={dynamic_config.think!r})."
             )
 
@@ -2547,7 +2522,7 @@ class TranscriptionThread(QThread):
             raw_content = stream_payload.get('content', '')
 
             # Fallback: strip <think> tags only for models that don't use think= param
-            # (e.g. DeepSeek-R1 with think=None may still emit tags inside content)
+            # and may still emit inline reasoning tags in message.content.
             if config.think is None:
                 raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
 
@@ -2715,7 +2690,7 @@ class RefinementThread(QThread):
             raw_content = stream_payload.get('content', '')
 
             # Fallback: strip <think> tags only for models that don't use think= param
-            # (e.g. DeepSeek-R1 with think=None may still emit tags inside content)
+            # and may still emit inline reasoning tags in message.content.
             if config.think is None:
                 raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
 
